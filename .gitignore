@@ -38,3 +38,6 @@ Thumbs.db
 *.o
 *.so
 *.dylib
+
+# Test scratch
+tests/.tmp/

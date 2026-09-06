@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+INSTALL_DIR="${NODE_HEALTHCHECK_INSTALL_DIR:-$HOME/.local/bin}"
 
 echo "=== node-healthcheck Setup ==="
 
@@ -16,39 +17,28 @@ check_command() {
     fi
 }
 
-# Uncomment and modify as needed:
-# check_command python3
-# check_command node
-# check_command cargo
+check_command bash
+check_command awk
+check_command df
 
-# Install dependencies
-# Uncomment the relevant section:
-
-# Python:
-# cd "$PROJECT_DIR"
-# python3 -m venv .venv
-# source .venv/bin/activate
-# pip install -r requirements.txt
-
-# Node.js:
-# cd "$PROJECT_DIR"
-# npm install
-
-# Rust:
-# cd "$PROJECT_DIR"
-# cargo build
-
-# Setup environment
-if [ ! -f "$PROJECT_DIR/.env" ] && [ -f "$PROJECT_DIR/.env.example" ]; then
-    cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"
-    echo "Created .env from .env.example - edit with your values."
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "ERROR: bash 4.0 or newer is required (found ${BASH_VERSION})."
+    exit 1
 fi
+
+chmod +x "$PROJECT_DIR/bin/node-healthcheck"
+
+mkdir -p "$INSTALL_DIR"
+ln -sf "$PROJECT_DIR/bin/node-healthcheck" "$INSTALL_DIR/node-healthcheck"
+echo "Linked $INSTALL_DIR/node-healthcheck -> $PROJECT_DIR/bin/node-healthcheck"
+
+case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *) echo "NOTE: $INSTALL_DIR is not on PATH; add it or call $PROJECT_DIR/bin/node-healthcheck directly." ;;
+esac
 
 echo "=== Setup complete ==="
 
-# Verification
-# Uncomment and modify:
-# echo "Running verification..."
-# python3 -c "import node-healthcheck; print('OK')"
-# npm test
-# cargo test
+echo "Running verification..."
+"$PROJECT_DIR/bin/node-healthcheck" --version
+bash "$PROJECT_DIR/tests/run.sh"

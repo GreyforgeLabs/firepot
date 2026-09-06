@@ -6,30 +6,25 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-
-      # Uncomment the setup step for your language:
-
-      # Python:
-      # - uses: actions/setup-python@v5
-      #   with:
-      #     python-version: "3.12"
-      # - run: pip install -r requirements.txt
-      # - run: python -m pytest
-
-      # Node.js:
-      # - uses: actions/setup-node@v4
-      #   with:
-      #     node-version: "22"
-      # - run: npm ci
-      # - run: npm test
-
-      # Rust:
-      # - uses: dtolnay/rust-toolchain@stable
-      # - run: cargo test
-
-      - run: echo "Configure CI for this project"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: shellcheck
+        run: shellcheck --version && shellcheck -S style bin/node-healthcheck scripts/setup.sh tests/run.sh
+      - name: Unit tests against fixtures
+        run: bash tests/run.sh
+      - name: Live smoke run on the runner
+        run: |
+          set +e
+          bin/node-healthcheck --no-color --skip peers,dns
+          rc=$?
+          set -e
+          echo "exit code: $rc"
+          test "$rc" -le 2
+          bin/node-healthcheck --json --skip peers,dns | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["checks"], d'
