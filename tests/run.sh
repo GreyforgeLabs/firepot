@@ -95,6 +95,7 @@ shim who 'printf "alice pts/0 2026-09-06 10:00\nbob pts/1 2026-09-06 10:05\n"'
 shim ssh '# Simulates a remote host by running the piped script locally.
 host=""; while [[ $# -gt 0 ]]; do case "$1" in -o) shift 2; continue;; --) shift; host="$1"; shift; break;; *) shift;; esac; done
 [[ "$host" == "down.example" ]] && exit 255
+[[ "$host" == "bad-report.example" ]] && { printf "%s\n" "{not-json"; exit 0; }
 export FAKE_HOSTNAME="$host"
 exec bash -c "$1"'
 
@@ -117,7 +118,7 @@ reset_env() {
 # ── Tests ────────────────────────────────────────────────────────────────────
 
 begin "version and help"
-run_nhc --version; assert_eq 0 "$RC" "exit"; assert_contains "$(cat "$OUT")" "node-healthcheck 1.0.0" "version"
+run_nhc --version; assert_eq 0 "$RC" "exit"; assert_contains "$(cat "$OUT")" "node-healthcheck 1.1.0" "version"
 run_nhc --help; assert_eq 0 "$RC" "exit"; assert_contains "$(cat "$OUT")" "Exit codes" "help"
 
 begin "healthy baseline is exit 0 with valid JSON"
@@ -145,6 +146,10 @@ assert_eq warn "$(jget "$OUT" 'd["checks"][1]["status"]')" "inodes warn"
 run_nhc --json --check disk --mounts /
 assert_eq 0 "$RC" "mounts filter exit"
 assert_eq 1 "$(jget "$OUT" 'len(d["checks"][0]["metrics"])')" "mounts filter count"
+run_nhc --json --check disk --mounts /not-present
+assert_eq 2 "$RC" "explicit missing mount is critical"
+assert_eq crit "$(jget "$OUT" 'd["checks"][0]["status"]')" "missing mount status"
+assert_contains "$(jget "$OUT" 'd["checks"][0]["summary"]')" "/not-present" "missing mount named"
 run_nhc --json --check disk --warn-disk 95 --crit-disk 99
 assert_eq 0 "$RC" "raised thresholds"
 
@@ -184,6 +189,20 @@ run_nhc --json --check dns --dns good.example; assert_eq 0 "$RC" "dns ok"
 assert_eq 203.0.113.9 "$(jget "$OUT" 'd["checks"][0]["metrics"]["address"]')" "dns address"
 run_nhc --json --check dns --dns bad.example; assert_eq 2 "$RC" "dns fail"
 run_nhc --json --check dns; assert_eq 0 "$RC" "dns unconfigured skips"
+
+begin "configured targets fail when their probe commands are unavailable"
+MIN_BIN="$TMP/min-bin"
+mkdir -p "$MIN_BIN"
+for binary in bash date hostname tr; do ln -s "$(command -v "$binary")" "$MIN_BIN/$binary"; done
+for spec in 'services --services good' 'ports --ports 22' 'peers --peers 203.0.113.1' 'dns --dns good.example'; do
+    read -r check flag target <<< "$spec"
+    set +e
+    PATH="$MIN_BIN" "$SCRIPT" --json --check "$check" "$flag" "$target" > "$TMP/min-out.txt" 2> "$TMP/min-err.txt"
+    min_rc=$?
+    set -e
+    assert_eq 2 "$min_rc" "$check missing probe exit"
+    assert_eq crit "$(jget "$TMP/min-out.txt" 'd["checks"][0]["status"]')" "$check missing probe status"
+done
 
 begin "gateway, network, failed units, time sync, reboot, zombies, sessions"
 reset_env
@@ -266,6 +285,10 @@ run_nhc --json --host node-a --host down.example --check load
 assert_eq 2 "$RC" "unreachable node is crit"
 assert_eq crit "$(jget "$OUT" 'd["nodes"][1]["status"]')" "down node status"
 assert_contains "$(jget "$OUT" 'd["nodes"][1]["error"]')" "ssh failed" "down node error"
+run_nhc --json --host node-a --host bad-report.example --check load
+assert_eq 2 "$RC" "invalid remote JSON is critical"
+assert_json_valid "$OUT" "aggregate with invalid remote JSON"
+assert_contains "$(jget "$OUT" 'd["nodes"][1]["error"]')" "invalid remote report" "invalid report error"
 run_nhc --no-color --host node-a --check disk
 assert_eq 2 "$RC" "remote crit propagates"
 assert_contains "$(cat "$OUT")" "[CRIT] node-a" "text node line"

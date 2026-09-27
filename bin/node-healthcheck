@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-NHC_VERSION="1.0.0"
+NHC_VERSION="1.1.0"
 
 # Roots are overridable so the check logic can be exercised against fixtures.
 PROC_ROOT="${NODE_HEALTHCHECK_PROC:-/proc}"
@@ -327,8 +327,15 @@ check_swap() {
 df_lines() {
     local flag="$1"
     if [[ -n "$MOUNTS" ]]; then
-        local m
-        while IFS= read -r m; do df -P "$flag" -- "$m" 2>/dev/null | awk 'NR == 2'; done < <(split_list "$MOUNTS")
+        local m output line
+        while IFS= read -r m; do
+            if output="$(df -P "$flag" -- "$m" 2>/dev/null)"; then
+                line="$(awk 'NR == 2' <<< "$output")"
+                if [[ -n "$line" ]]; then printf '%s\n' "$line"; else printf '__NHC_MISSING_MOUNT__%s\n' "$m"; fi
+            else
+                printf '__NHC_MISSING_MOUNT__%s\n' "$m"
+            fi
+        done < <(split_list "$MOUNTS")
     else
         df -P "$flag" -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x fuse.portal 2>/dev/null | awk 'NR > 1'
     fi
@@ -336,9 +343,13 @@ df_lines() {
 
 check_fs_usage() {
     local name="$1" flag="$2" warn="$3" crit="$4" unit="$5"
-    local worst="ok" summary="" count=0 metrics=() line mount pct level
+    local worst="ok" summary="" count=0 metrics=() line mount pct level missing=""
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
+        if [[ "$line" == __NHC_MISSING_MOUNT__* ]]; then
+            missing+="${missing:+, }${line#__NHC_MISSING_MOUNT__}"
+            continue
+        fi
         mount="$(awk '{print $NF}' <<< "$line")"
         pct="$(awk '{print $(NF-1)}' <<< "$line")"; pct="${pct%\%}"
         is_int "$pct" || continue
@@ -348,7 +359,11 @@ check_fs_usage() {
         if (( $(status_rank "$level") > $(status_rank "$worst") )); then worst="$level"; fi
         if [[ "$level" != "ok" ]]; then summary+="${summary:+, }${mount} ${pct}%"; fi
     done < <(df_lines "$flag")
-    if (( count == 0 )); then record "$name" skip "no filesystems found"; return; fi
+    if [[ -n "$missing" ]]; then
+        worst="crit"
+        summary+="${summary:+, }missing mount: $missing"
+    fi
+    if (( count == 0 )) && [[ -z "$missing" ]]; then record "$name" skip "no filesystems found"; return; fi
     if [[ -z "$summary" ]]; then summary="$count filesystem(s) under ${warn}% $unit"; fi
     record "$name" "$worst" "$summary" "${metrics[@]}"
 }
@@ -380,7 +395,7 @@ check_gateway() {
 
 check_dns() {
     [[ -n "$DNS_NAME" ]] || { record dns skip "no --dns name configured"; return; }
-    has getent || { record dns skip "getent unavailable"; return; }
+    has getent || { record dns crit "getent unavailable for configured DNS target"; return; }
     local resolved
     resolved="$(getent ahosts "$DNS_NAME" 2>/dev/null | awk 'NR == 1 {print $1}')"
     if [[ -n "$resolved" ]]; then record dns ok "$DNS_NAME -> $resolved" "name=$DNS_NAME" "address=$resolved"
@@ -392,7 +407,7 @@ check_units() {
     local -a scope=()
     [[ -n "$3" ]] && scope=("$3")
     [[ -n "$list" ]] || { record "$name" skip "none configured"; return; }
-    has systemctl || { record "$name" skip "systemctl unavailable"; return; }
+    has systemctl || { record "$name" crit "systemctl unavailable for configured units"; return; }
     local unit down="" up=0 total=0 metrics=()
     while IFS= read -r unit; do
         total=$(( total + 1 ))
@@ -414,7 +429,7 @@ listening_ports() {
 
 check_ports() {
     [[ -n "$PORTS" ]] || { record ports skip "none configured"; return; }
-    if ! has ss && ! has netstat; then record ports skip "ss and netstat unavailable"; return; fi
+    if ! has ss && ! has netstat; then record ports crit "ss and netstat unavailable for configured ports"; return; fi
     local open port missing="" up=0 total=0 metrics=()
     open="$(listening_ports)"
     while IFS= read -r port; do
@@ -429,7 +444,7 @@ check_ports() {
 
 check_peers() {
     [[ -n "$PEERS" ]] || { record peers skip "none configured"; return; }
-    has ping || { record peers skip "ping unavailable"; return; }
+    has ping || { record peers crit "ping unavailable for configured peers"; return; }
     local peer down="" up=0 total=0 metrics=()
     while IFS= read -r peer; do
         total=$(( total + 1 ))
@@ -549,17 +564,50 @@ remote_args() {
     printf '%q ' "${args[@]}"
 }
 
+validate_remote_json() {
+    python3 -c '
+import json, sys
+raw = sys.stdin.buffer.read(1024 * 1024 + 1)
+if len(raw) > 1024 * 1024:
+    raise SystemExit(1)
+try:
+    data = json.loads(raw, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+except (UnicodeError, ValueError):
+    raise SystemExit(1)
+expected_exit = int(sys.argv[1])
+if not (isinstance(data, dict)
+        and data.get("node-healthcheck") == sys.argv[2]
+        and isinstance(data.get("host"), str)
+        and data.get("status") == ("ok", "warn", "crit")[expected_exit]
+        and type(data.get("exit_code")) is int
+        and data["exit_code"] == expected_exit
+        and isinstance(data.get("checks"), list)
+        and all(isinstance(check, dict)
+                and isinstance(check.get("name"), str)
+                and check.get("status") in ("ok", "warn", "crit", "skip")
+                and isinstance(check.get("summary"), str)
+                for check in data["checks"])):
+    raise SystemExit(1)
+print(json.dumps(data, separators=(",", ":"), ensure_ascii=False))
+' "$1" "$NHC_VERSION"
+}
+
 run_remote() {
     has ssh || die "ssh is required for --host"
-    local host output rc nodes="" first=1 node_status node_exit worst=0 worst_status="ok" args
+    has python3 || die "python3 is required on the originating host for --host report validation"
+    local host output raw rc nodes="" first=1 node_status node_exit worst=0 worst_status="ok" args remote_error
     args="$(remote_args)"
     # shellcheck disable=SC2086
     while IFS= read -r host; do
         set +e
-        output="$(ssh -o BatchMode=yes -o ConnectTimeout="$SSH_TIMEOUT" $SSH_OPTS -- "$host" "bash -s -- $args" < "${BASH_SOURCE[0]}" 2>/dev/null)"
+        raw="$(ssh -o BatchMode=yes -o ConnectTimeout="$SSH_TIMEOUT" $SSH_OPTS -- "$host" "bash -s -- $args" < "${BASH_SOURCE[0]}" 2>/dev/null)"
         rc=$?
         set -e
-        if (( rc == 0 || rc == 1 || rc == 2 )) && [[ "$output" == \{* ]]; then
+        output=""
+        if (( rc == 0 || rc == 1 || rc == 2 )); then
+            output="$(validate_remote_json "$rc" <<< "$raw")" || output=""
+        fi
+        if [[ -n "$output" ]]; then
             node_exit=$rc
             case "$rc" in 0) node_status=ok ;; 1) node_status=warn ;; *) node_status=crit ;; esac
             (( first )) || nodes+=","
@@ -567,9 +615,11 @@ run_remote() {
             nodes+="$output"
         else
             node_exit=2; node_status=crit
+            remote_error="invalid remote report (exit $rc)"
+            if (( rc > 2 )); then remote_error="ssh failed with exit $rc"; fi
             (( first )) || nodes+=","
             first=0
-            nodes+="{\"node-healthcheck\":$(json_str "$NHC_VERSION"),\"host\":$(json_str "$host"),\"status\":\"crit\",\"exit_code\":2,\"error\":$(json_str "ssh failed with exit $rc"),\"checks\":[]}"
+            nodes+="{\"node-healthcheck\":$(json_str "$NHC_VERSION"),\"host\":$(json_str "$host"),\"status\":\"crit\",\"exit_code\":2,\"error\":$(json_str "$remote_error"),\"checks\":[]}"
         fi
         if (( node_exit > worst )); then worst=$node_exit; worst_status=$node_status; fi
         if (( ! JSON )); then
@@ -581,7 +631,7 @@ run_remote() {
                 grep -o '{"name":"[^"]*","status":"\(warn\|crit\)","summary":"[^"]*"' <<< "$output" \
                     | sed -E 's/\{"name":"([^"]*)","status":"([^"]*)","summary":"([^"]*)"/    [\2] \1: \3/' || true
             elif [[ "$node_status" != "ok" ]]; then
-                printf '    ssh failed with exit %d\n' "$rc"
+                printf '    %s\n' "$remote_error"
             fi
         fi
     done < <(split_list "$HOSTS")

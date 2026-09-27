@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-09-27
+
+### Fixed
+
+- Treat missing explicitly requested mounts and missing probe commands for configured services, ports, peers, and DNS as critical instead of healthy skips.
+- Validate and bound remote JSON before inserting it into a fleet report; malformed reports now become critical node errors.
+
+### Changed
+
+- Fleet aggregation requires Python 3 on the originating host for JSON validation. Remote hosts and local-only scans retain the single-script deployment model.
+
 ## [1.0.0] - 2026-09-06
 
 ### Added

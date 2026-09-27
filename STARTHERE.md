@@ -48,7 +48,7 @@ node-healthcheck/
 
 ```bash
 bin/node-healthcheck --version
-# Expected output: node-healthcheck 1.0.0
+# Expected output: node-healthcheck 1.1.0
 bash tests/run.sh
 # Expected output: node-healthcheck tests: N passed, 0 failed
 ```

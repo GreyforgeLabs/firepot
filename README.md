@@ -1,6 +1,6 @@
 # node-healthcheck
 
-> One bash script that tells you whether a Linux host is healthy, prints JSON, exits 0, 1, or 2, and runs across a fleet over SSH.
+> One bash script that checks a Linux host, prints JSON, exits 0, 1, or 2 for health states, and runs across a fleet over SSH.
 
 [![CI](https://github.com/GreyforgeLabs/node-healthcheck/actions/workflows/ci.yml/badge.svg)](https://github.com/GreyforgeLabs/node-healthcheck/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
@@ -18,7 +18,7 @@
 
 Every homelab and small fleet ends up with the same script: a few `df` and `free` calls, a loop over services, a ping to the gateway. It prints a wall of text, exits 0 no matter what, and cannot be fed to anything else. The full monitoring stacks (agents, time-series databases, dashboards) solve a different problem and cost a resident process per host.
 
-`node-healthcheck` is the script you would eventually write, finished. It needs nothing but bash and coreutils, reports every check with a status and numeric metrics, emits JSON when asked, returns an exit code a cron job or CI step can act on, and can stream itself to other hosts over SSH and aggregate their answers.
+`node-healthcheck` is the script you would eventually write, finished. Local checks use bash, coreutils, awk, and the standard command for each probe. It reports every check with a status and numeric metrics, emits JSON when asked, returns an exit code a cron job or CI step can act on, and can stream itself to other hosts over SSH and aggregate their answers.
 
 ## Quick Start
 
@@ -40,7 +40,7 @@ chmod +x node-healthcheck
 ## Example
 
 ```text
-node-healthcheck 1.0.0 - node-a - 2026-09-06T21:02:11Z
+node-healthcheck 1.1.0 - node-a - 2026-09-06T21:02:11Z
 
 [OK  ] system           node-a, kernel 6.8.0-45-generic, up 12d 4h 9m
 [OK  ] load             0.42 0.31 0.28 on 8 cores (0.05/core)
@@ -70,9 +70,10 @@ Overall: CRIT (exit 2)
 - **Meaningful exit codes** - `0` healthy, `1` warning, `2` critical, `3` usage or runtime error. `cron` jobs, CI steps, and wrappers can branch on the result without parsing text
 - **JSON output** - `--json` emits one document with per-check `status`, `summary`, and numeric `metrics`, generated without `jq`
 - **Configurable thresholds** - warn and crit levels for load per core, memory, swap, disk, inodes, and zombies, from flags or a config file
-- **Multi-node** - `--host user@node` streams the script over SSH, runs it there, and aggregates the results. Nothing is installed on the remote side
+- **Multi-node** - `--host user@node` streams the script over SSH, validates each remote JSON report, and aggregates the results. Nothing is installed on the remote side
 - **Config files that cannot run code** - `--config` files are `key=value` and are parsed line by line, never sourced
-- **Zero dependencies** - bash 4+, coreutils, awk. Each check probes with the standard tool for the job (`df`, `ip`, `ss`, `systemctl`, `ping`, `getent`, `timedatectl`) and reports `skip` if the tool is absent
+- **Single-file local checks** - bash 4+, coreutils, awk, and the standard tool for each probe (`df`, `ip`, `ss`, `systemctl`, `ping`, `getent`, `timedatectl`). Fleet aggregation also needs SSH and Python 3 on the originating host
+- **Configured targets must be checked** - missing requested mounts or probe commands for configured services, ports, peers, or DNS are critical rather than silently skipped
 
 ## Usage
 
@@ -107,16 +108,16 @@ node-healthcheck --host admin@node-a --host admin@node-b --host admin@node-c --j
 
 | Code | Meaning |
 |---|---|
-| `0` | every selected check is `ok`, `info`, or `skip` |
+| `0` | every selected check is `ok`, `info`, or an unconfigured optional `skip` |
 | `1` | at least one `warn`, no `crit` |
-| `2` | at least one `crit`, or a host in `--host` mode could not be reached |
+| `2` | at least one `crit`, including an uncheckable configured target or invalid/unreachable remote report |
 | `3` | usage error, invalid threshold, unreadable config, unknown check |
 
 ### JSON shape
 
 ```json
 {
-  "node-healthcheck": "1.0.0",
+  "node-healthcheck": "1.1.0",
   "host": "node-a",
   "timestamp": "2026-09-06T21:02:11Z",
   "status": "crit",
@@ -129,7 +130,7 @@ node-healthcheck --host admin@node-a --host admin@node-b --host admin@node-c --j
 }
 ```
 
-In `--host` mode the top-level document has `nodes`, one entry per host, each in the shape above. A host that cannot be reached becomes `{"host": "...", "status": "crit", "error": "ssh failed with exit 255", "checks": []}`.
+In `--host` mode the top-level document has `nodes`, one entry per host, each in the shape above. A host that cannot be reached becomes `{"host": "...", "status": "crit", "error": "ssh failed with exit 255", "checks": []}`. Invalid remote JSON is also critical; it is never spliced into the aggregate.
 
 ### Config file
 
@@ -141,7 +142,7 @@ See [examples/node-healthcheck.conf](examples/node-healthcheck.conf). Keys mirro
 node-healthcheck --host admin@node-a --host admin@node-b --services ssh --ports 22
 ```
 
-The script is sent to each host on standard input (`ssh host bash -s -- <flags>`), so the remote side needs only bash and an SSH login. `--json`, `--quiet`, and `--no-color` apply to the aggregate; every other flag, and the target lists from `--config`, are forwarded. Use `--ssh-opts` for keys or jump hosts and `--ssh-timeout` for slow links.
+The script is sent to each host on standard input (`ssh host bash -s -- <flags>`), so the remote side needs only bash and an SSH login. The originating host needs Python 3 to validate each bounded remote JSON report before aggregation. `--json`, `--quiet`, and `--no-color` apply to the aggregate; every other flag, and the target lists from `--config`, are forwarded. Use `--ssh-opts` for keys or jump hosts and `--ssh-timeout` for slow links.
 
 ## Checks
 
