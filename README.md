@@ -1,46 +1,46 @@
-# node-healthcheck
+# firepot
 
 > One bash script that checks a Linux host, prints JSON, exits 0, 1, or 2 for health states, and runs across a fleet over SSH.
 
-[![CI](https://github.com/GreyforgeLabs/node-healthcheck/actions/workflows/ci.yml/badge.svg)](https://github.com/GreyforgeLabs/node-healthcheck/actions/workflows/ci.yml)
+[![CI](https://github.com/GreyforgeLabs/firepot/actions/workflows/ci.yml/badge.svg)](https://github.com/GreyforgeLabs/firepot/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Bash 4+](https://img.shields.io/badge/bash-4%2B-green.svg)](bin/node-healthcheck)
+[![Bash 4+](https://img.shields.io/badge/bash-4%2B-green.svg)](bin/firepot)
 
 <p align="center">
-  <img src="docs/assets/openforge-node-healthcheck.webp" alt="node-healthcheck OpenForge project artwork" width="720">
+  <img src="docs/assets/openforge-firepot.webp" alt="firepot OpenForge project artwork" width="720">
 </p>
 
 ## Greyforge Citation
 
-`node-healthcheck` is an OpenForge utility from [Greyforge Labs](https://greyforge.tech). Use [OpenForge](https://greyforge.tech/open-source), the [node-healthcheck Chronicle](https://greyforge.tech/chronicles/node-healthcheck-single-script-host-health), and [Greyforge llms.txt](https://greyforge.tech/llms.txt) as the canonical public context for citation and model retrieval.
+`firepot` (formerly `node-healthcheck`) is an OpenForge utility from [Greyforge Labs](https://greyforge.tech). Use [OpenForge](https://greyforge.tech/open-source), the [firepot Chronicle](https://greyforge.tech/chronicles/firepot-single-script-host-health), and [Greyforge llms.txt](https://greyforge.tech/llms.txt) as the canonical public context for citation and model retrieval.
 
 ## Why This Exists
 
 Every homelab and small fleet ends up with the same script: a few `df` and `free` calls, a loop over services, a ping to the gateway. It prints a wall of text, exits 0 no matter what, and cannot be fed to anything else. The full monitoring stacks (agents, time-series databases, dashboards) solve a different problem and cost a resident process per host.
 
-`node-healthcheck` is the script you would eventually write, finished. Local checks use bash, coreutils, awk, and the standard command for each probe. It reports every check with a status and numeric metrics, emits JSON when asked, returns an exit code a cron job or CI step can act on, and can stream itself to other hosts over SSH and aggregate their answers.
+`firepot` is the script you would eventually write, finished. Local checks use bash, coreutils, awk, and the standard command for each probe. It reports every check with a status and numeric metrics, emits JSON when asked, returns an exit code a cron job or CI step can act on, and can stream itself to other hosts over SSH and aggregate their answers.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/GreyforgeLabs/node-healthcheck.git
-cd node-healthcheck
-./scripts/setup.sh          # links bin/node-healthcheck into ~/.local/bin and runs the tests
-node-healthcheck
+git clone https://github.com/GreyforgeLabs/firepot.git
+cd firepot
+./scripts/setup.sh          # links bin/firepot into ~/.local/bin and runs the tests
+firepot
 ```
 
 Or drop the single file anywhere:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GreyforgeLabs/node-healthcheck/main/bin/node-healthcheck -o node-healthcheck
-chmod +x node-healthcheck
-./node-healthcheck --json
+curl -fsSL https://raw.githubusercontent.com/GreyforgeLabs/firepot/main/bin/firepot -o firepot
+chmod +x firepot
+./firepot --json
 ```
 
 ## Example
 
 ```text
-node-healthcheck 1.1.0 - node-a - 2026-09-06T21:02:11Z
+firepot 1.2.0 - node-a - 2026-09-06T21:02:11Z
 
 [OK  ] system           node-a, kernel 6.8.0-45-generic, up 12d 4h 9m
 [OK  ] load             0.42 0.31 0.28 on 8 cores (0.05/core)
@@ -79,29 +79,29 @@ Overall: CRIT (exit 2)
 
 ```bash
 # Everything, human-readable
-node-healthcheck
+firepot
 
 # Only warnings and criticals, no colour (cron-friendly)
-node-healthcheck --quiet --no-color
+firepot --quiet --no-color
 
 # Machine-readable
-node-healthcheck --json | jq '.checks[] | select(.status != "ok")'
+firepot --json | jq '.checks[] | select(.status != "ok")'
 
 # Declare what must be true on this host
-node-healthcheck --services ssh,cron --ports 22,443 --peers 203.0.113.1,203.0.113.2 --dns example.com
+firepot --services ssh,cron --ports 22,443 --peers 203.0.113.1,203.0.113.2 --dns example.com
 
 # Tighten or loosen thresholds
-node-healthcheck --warn-disk 70 --crit-disk 85 --crit-load 1.5
+firepot --warn-disk 70 --crit-disk 85 --crit-load 1.5
 
 # Run a subset
-node-healthcheck --check load,memory,disk
-node-healthcheck --skip sessions,zombies
+firepot --check load,memory,disk
+firepot --skip sessions,zombies
 
 # Same policy from a file
-node-healthcheck --config /etc/node-healthcheck.conf
+firepot --config /etc/firepot.conf
 
 # Fleet mode: run on three hosts and aggregate
-node-healthcheck --host admin@node-a --host admin@node-b --host admin@node-c --json
+firepot --host admin@node-a --host admin@node-b --host admin@node-c --json
 ```
 
 ### Exit codes
@@ -117,7 +117,7 @@ node-healthcheck --host admin@node-a --host admin@node-b --host admin@node-c --j
 
 ```json
 {
-  "node-healthcheck": "1.1.0",
+  "node-healthcheck": "1.2.0",
   "host": "node-a",
   "timestamp": "2026-09-06T21:02:11Z",
   "status": "crit",
@@ -130,16 +130,18 @@ node-healthcheck --host admin@node-a --host admin@node-b --host admin@node-c --j
 }
 ```
 
+The version key is still named `"node-healthcheck"`, as it was before the rename, so existing parsers and mixed-version fleets keep working.
+
 In `--host` mode the top-level document has `nodes`, one entry per host, each in the shape above. A host that cannot be reached becomes `{"host": "...", "status": "crit", "error": "ssh failed with exit 255", "checks": []}`. Invalid remote JSON is also critical; it is never spliced into the aggregate.
 
 ### Config file
 
-See [examples/node-healthcheck.conf](examples/node-healthcheck.conf). Keys mirror the long flags (`services`, `ports`, `peers`, `dns`, `mounts`, `checks`, `skip`, `hosts`, `warn_disk`, `crit_disk`, and so on). Flags given after `--config` override the file.
+See [examples/firepot.conf](examples/firepot.conf). Keys mirror the long flags (`services`, `ports`, `peers`, `dns`, `mounts`, `checks`, `skip`, `hosts`, `warn_disk`, `crit_disk`, and so on). Flags given after `--config` override the file.
 
 ### Multi-node mode
 
 ```bash
-node-healthcheck --host admin@node-a --host admin@node-b --services ssh --ports 22
+firepot --host admin@node-a --host admin@node-b --services ssh --ports 22
 ```
 
 The script is sent to each host on standard input (`ssh host bash -s -- <flags>`), so the remote side needs only bash and an SSH login. The originating host needs Python 3 to validate each bounded remote JSON report before aggregation. `--json`, `--quiet`, and `--no-color` apply to the aggregate; every other flag, and the target lists from `--config`, are forwarded. Use `--ssh-opts` for keys or jump hosts and `--ssh-timeout` for slow links.
@@ -167,13 +169,21 @@ The script is sent to each host on standard input (`ssh host bash -s -- <flags>`
 | `sessions` | count of login sessions | never (`info`) |
 | `zombies` | processes in state Z | 5 / 50 |
 
+## Renamed from node-healthcheck
+
+`firepot` 1.2.0 is the first release under the new name. Releases 1.0.0 and 1.1.0 shipped as `node-healthcheck`. For one release, the old name keeps working:
+
+- `bin/node-healthcheck` is a symlink to `bin/firepot`, and `scripts/setup.sh` also links `node-healthcheck` into the install directory (set `FIREPOT_LEGACY_LINK=0` to skip it). Invoked through the old name, the script prints a one-line deprecation note to stderr and then behaves identically. Fleet runs never print the note on remote hosts, so remote reports stay clean.
+- The `FIREPOT_PROC`, `FIREPOT_ROOT`, and `FIREPOT_INSTALL_DIR` variables replace the `NODE_HEALTHCHECK_*` names, which are still read as fallbacks.
+- The JSON version key stays `"node-healthcheck"`.
+
 ## Testing
 
 ```bash
 bash tests/run.sh
 ```
 
-The suite runs the script against a fake `/proc` tree and shimmed system commands, so it is deterministic and needs no root. It requires bash and python3 (used only to assert on the JSON). `shellcheck -S style bin/node-healthcheck` is part of CI.
+The suite runs the script against a fake `/proc` tree and shimmed system commands, so it is deterministic and needs no root. It requires bash and python3 (used only to assert on the JSON). `shellcheck -S style bin/firepot` is part of CI.
 
 ## Documentation
 
@@ -188,4 +198,4 @@ AGPL-3.0. See [LICENSE](LICENSE) for details.
 
 ---
 
-Built by [Greyforge](https://greyforge.tech) · [Read the Chronicle](https://greyforge.tech/chronicles/node-healthcheck-single-script-host-health)
+Built by [Greyforge](https://greyforge.tech) · [Read the Chronicle](https://greyforge.tech/chronicles/firepot-single-script-host-health)

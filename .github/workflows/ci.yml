@@ -16,15 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: shellcheck
-        run: shellcheck --version && shellcheck -S style bin/node-healthcheck scripts/setup.sh tests/run.sh
+        run: shellcheck --version && shellcheck -S style bin/firepot scripts/setup.sh tests/run.sh
       - name: Unit tests against fixtures
         run: bash tests/run.sh
       - name: Live smoke run on the runner
         run: |
           set +e
-          bin/node-healthcheck --no-color --skip peers,dns
+          bin/firepot --no-color --skip peers,dns
           rc=$?
           set -e
           echo "exit code: $rc"
           test "$rc" -le 2
-          bin/node-healthcheck --json --skip peers,dns | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["checks"], d'
+          bin/firepot --json --skip peers,dns | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["checks"], d'

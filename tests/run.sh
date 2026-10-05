@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Fixture-driven tests for node-healthcheck. Needs bash and python3 (JSON assertions only).
+# Fixture-driven tests for firepot. Needs bash and python3 (JSON assertions only).
 # Shim bodies are deliberately single-quoted so they expand when the shim runs, not here.
 # shellcheck disable=SC2016
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
-SCRIPT="$ROOT/bin/node-healthcheck"
+SCRIPT="$ROOT/bin/firepot"
+LEGACY="$ROOT/bin/node-healthcheck"
 TMP="$HERE/.tmp"
 rm -rf "$TMP"
 mkdir -p "$TMP"
@@ -102,6 +103,16 @@ exec bash -c "$1"'
 run_nhc() { # args... -> stdout captured to $OUT, exit code in $RC
     OUT="$TMP/out.txt"
     set +e
+    PATH="$BIN:$PATH" FIREPOT_PROC="$PROC" FIREPOT_ROOT="$FSROOT" \
+        FAKE_DF_K="$FIX/df-k.txt" FAKE_DF_I="$FIX/df-i.txt" \
+        "${NHC_ENTRY:-$SCRIPT}" "$@" > "$OUT" 2> "$TMP/err.txt"
+    RC=$?
+    set -e
+}
+
+run_legacy_env() { # pre-rename NODE_HEALTHCHECK_* variables only
+    OUT="$TMP/out.txt"
+    set +e
     PATH="$BIN:$PATH" NODE_HEALTHCHECK_PROC="$PROC" NODE_HEALTHCHECK_ROOT="$FSROOT" \
         FAKE_DF_K="$FIX/df-k.txt" FAKE_DF_I="$FIX/df-i.txt" \
         "$SCRIPT" "$@" > "$OUT" 2> "$TMP/err.txt"
@@ -118,7 +129,8 @@ reset_env() {
 # ── Tests ────────────────────────────────────────────────────────────────────
 
 begin "version and help"
-run_nhc --version; assert_eq 0 "$RC" "exit"; assert_contains "$(cat "$OUT")" "node-healthcheck 1.1.0" "version"
+run_nhc --version; assert_eq 0 "$RC" "exit"; assert_eq "firepot 1.2.0" "$(cat "$OUT")" "version"
+assert_eq "" "$(cat "$TMP/err.txt")" "no stderr under the new name"
 run_nhc --help; assert_eq 0 "$RC" "exit"; assert_contains "$(cat "$OUT")" "Exit codes" "help"
 
 begin "healthy baseline is exit 0 with valid JSON"
@@ -297,7 +309,72 @@ run_nhc --json --host node-a --config "$TMP/test.conf" --check services
 assert_eq 2 "$RC" "config lists forwarded to remote"
 assert_contains "$(jget "$OUT" 'd["nodes"][0]["checks"][0]["summary"]')" "inactive: bad" "remote used config services"
 
+begin "deprecated node-healthcheck alias and pre-rename compatibility"
+reset_env
+assert_eq firepot "$(readlink "$LEGACY")" "bin/node-healthcheck is a relative symlink to firepot"
+run_nhc --json --check load,memory
+cp "$OUT" "$TMP/new-name.json"
+assert_eq 1.2.0 "$(jget "$OUT" 'd["node-healthcheck"]')" "JSON keeps the node-healthcheck version key"
+NHC_ENTRY="$LEGACY" run_nhc --json --check load,memory
+assert_eq 0 "$RC" "alias exit"
+assert_json_valid "$OUT" "alias json"
+assert_eq "$(jget "$TMP/new-name.json" '[(c["name"], c["status"]) for c in d["checks"]]')" \
+    "$(jget "$OUT" '[(c["name"], c["status"]) for c in d["checks"]]')" "alias behaves identically"
+assert_eq 1 "$(grep -c . "$TMP/err.txt")" "alias prints exactly one stderr line"
+assert_contains "$(cat "$TMP/err.txt")" "deprecated" "alias deprecation note"
+assert_contains "$(cat "$TMP/err.txt")" "firepot" "alias names the new tool"
+NHC_ENTRY="$LEGACY" run_nhc --version
+assert_eq "firepot 1.2.0" "$(cat "$OUT")" "alias version on stdout is unchanged"
+ALIAS_DIR="$TMP/alias-bin"; mkdir -p "$ALIAS_DIR"; ln -s "$SCRIPT" "$ALIAS_DIR/node-healthcheck"
+NHC_ENTRY="$ALIAS_DIR/node-healthcheck" run_nhc --version
+assert_contains "$(cat "$TMP/err.txt")" "deprecated" "installed absolute alias link also warns"
+NHC_ENTRY="$LEGACY" run_nhc --json --host node-a --host node-b --check load
+assert_eq 0 "$RC" "fleet via alias"
+assert_json_valid "$OUT" "fleet via alias json"
+assert_eq "1.2.0 1.2.0" "$(jget "$OUT" '" ".join(n["node-healthcheck"] for n in d["nodes"])')" "remote reports keep the version key"
+assert_eq "" "$(jget "$OUT" '" ".join(n.get("error", "") for n in d["nodes"]).strip()')" "remote reports validate"
+assert_eq 1 "$(grep -c . "$TMP/err.txt")" "fleet via alias: one local note"
+# Remotes receive the file on stdin exactly as run_remote sends it ("bash -s").
+set +e
+stream_out="$(PATH="$BIN:$PATH" FIREPOT_PROC="$PROC" bash -s -- --json --check load < "$LEGACY" 2> "$TMP/stream-err.txt")"
+stream_rc=$?
+set -e
+assert_eq 0 "$stream_rc" "streamed run exit"
+assert_eq "" "$(cat "$TMP/stream-err.txt")" "streamed (remote) run prints no deprecation note"
+assert_contains "$stream_out" '"node-healthcheck":"1.2.0"' "streamed run keeps the version key"
+LEGACY_SSH_BIN="$TMP/legacy-ssh-bin"; mkdir -p "$LEGACY_SSH_BIN"
+cat > "$LEGACY_SSH_BIN/ssh" <<'SSH'
+#!/usr/bin/env bash
+# A remote whose report carries only the key a hypothetical future emitter might use.
+printf '{"firepot":"1.2.0","host":"node-f","status":"ok","exit_code":0,"checks":[]}\n'
+SSH
+chmod +x "$LEGACY_SSH_BIN/ssh"
+set +e
+PATH="$LEGACY_SSH_BIN:$BIN:$PATH" "$SCRIPT" --json --host node-f --check load > "$TMP/out.txt" 2>/dev/null
+RC=$?
+set -e
+assert_eq 0 "$RC" "validator accepts a firepot-keyed report"
+run_legacy_env --json --check load,reboot_required
+assert_eq 0 "$RC" "NODE_HEALTHCHECK_* fallback exit"
+assert_eq 0.4 "$(jget "$OUT" '[c for c in d["checks"] if c["name"]=="load"][0]["metrics"]["load1"]')" "NODE_HEALTHCHECK_PROC fallback"
+mkdir -p "$FSROOT/run"; touch "$FSROOT/run/reboot-required"
+run_legacy_env --json --check reboot_required
+assert_eq 1 "$RC" "NODE_HEALTHCHECK_ROOT fallback"
+set +e
+PATH="$BIN:$PATH" FIREPOT_ROOT="$TMP/empty-root" NODE_HEALTHCHECK_ROOT="$FSROOT" FIREPOT_PROC="$PROC" \
+    FAKE_DF_K="$FIX/df-k.txt" FAKE_DF_I="$FIX/df-i.txt" "$SCRIPT" --json --check reboot_required > "$TMP/out.txt" 2>/dev/null
+RC=$?
+set -e
+assert_eq 0 "$RC" "FIREPOT_ROOT takes precedence over NODE_HEALTHCHECK_ROOT"
+mkdir -p "$TMP/decoy-proc"; printf '9.99 9.99 9.99 1/100 1\n' > "$TMP/decoy-proc/loadavg"
+set +e
+PATH="$BIN:$PATH" FIREPOT_PROC="$PROC" NODE_HEALTHCHECK_PROC="$TMP/decoy-proc" FIREPOT_ROOT="$FSROOT" \
+    FAKE_DF_K="$FIX/df-k.txt" FAKE_DF_I="$FIX/df-i.txt" "$SCRIPT" --json --check load > "$TMP/out.txt" 2>/dev/null
+set -e
+assert_eq 0.4 "$(jget "$TMP/out.txt" '[c for c in d["checks"] if c["name"]=="load"][0]["metrics"]["load1"]')" \
+    "FIREPOT_PROC takes precedence over NODE_HEALTHCHECK_PROC"
+
 echo
-echo "node-healthcheck tests: $PASS passed, $FAIL failed"
+echo "firepot tests: $PASS passed, $FAIL failed"
 rm -rf "$TMP"
 (( FAIL == 0 ))

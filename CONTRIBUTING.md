@@ -1,12 +1,12 @@
-# Contributing to node-healthcheck
+# Contributing to firepot
 
 Thanks for your interest in contributing. This guide covers the process for submitting changes.
 
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/node-healthcheck.git`
-3. Run setup: `cd node-healthcheck && ./scripts/setup.sh`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/firepot.git`
+3. Run setup: `cd firepot && ./scripts/setup.sh`
 4. Create a branch: `git checkout -b your-feature`
 
 ## Development Workflow

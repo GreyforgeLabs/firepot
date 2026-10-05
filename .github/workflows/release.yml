@@ -18,17 +18,21 @@ jobs:
         run: |
           set -euo pipefail
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          SCRIPT_VERSION="$(bin/node-healthcheck --version | awk '{print $2}')"
+          SCRIPT_VERSION="$(bin/firepot --version | awk '{print $2}')"
           if [ "$TAG_VERSION" != "$SCRIPT_VERSION" ]; then
             echo "Tag version $TAG_VERSION does not match script version $SCRIPT_VERSION"
             exit 1
           fi
-      - run: shellcheck -S style bin/node-healthcheck scripts/setup.sh tests/run.sh
+      - run: shellcheck -S style bin/firepot scripts/setup.sh tests/run.sh
       - run: bash tests/run.sh
       - name: Package release artifact
         run: |
           mkdir -p dist
-          cp bin/node-healthcheck dist/node-healthcheck
+          cp bin/firepot dist/firepot
+          (cd dist && sha256sum firepot > firepot.sha256)
+          # Deprecated old-name copy for one release, so existing download
+          # scripts keep working; it prints a deprecation note when run.
+          cp bin/firepot dist/node-healthcheck
           (cd dist && sha256sum node-healthcheck > node-healthcheck.sha256)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-10-05
+
+### Changed
+
+- Renamed from node-healthcheck to firepot. The script is now `bin/firepot`, and the usage text, version banner, and error prefix say `firepot`. The example config is `examples/firepot.conf`.
+- `scripts/setup.sh` links `firepot` into the install directory. It also links the deprecated `node-healthcheck` alias unless `FIREPOT_LEGACY_LINK=0`.
+- Release assets are `firepot` and `firepot.sha256`. A deprecated `node-healthcheck` copy and checksum are also published for this release.
+- New environment variables `FIREPOT_PROC`, `FIREPOT_ROOT`, and `FIREPOT_INSTALL_DIR`.
+
+### Deprecated
+
+- The `node-healthcheck` name keeps working for this release only. `bin/node-healthcheck` stays in the repository as a symlink to `bin/firepot`. Invoked through the old name, the script prints a one-line deprecation note to stderr and then behaves identically. Remote hosts in fleet mode never print it.
+- `NODE_HEALTHCHECK_PROC`, `NODE_HEALTHCHECK_ROOT`, and `NODE_HEALTHCHECK_INSTALL_DIR` are still read as fallbacks when the `FIREPOT_*` variable is unset.
+
+### Compatibility
+
+- The JSON version key stays `"node-healthcheck"` in local, fleet, and per-node error reports. Fleet validation accepts reports keyed `"node-healthcheck"` or `"firepot"`.
+
 ## [1.1.0] - 2026-09-27
 
 ### Fixed
