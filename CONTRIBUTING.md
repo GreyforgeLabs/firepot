@@ -11,7 +11,7 @@ Thanks for your interest in contributing. This guide covers the process for subm
 
 ## Development Workflow
 
-1. Make your changes
+1. Make your changes. Edit `bin/firepot`, then copy it over the deprecated alias: `cp bin/firepot bin/node-healthcheck` (the tests check the two are identical)
 2. Run tests to verify nothing is broken
 3. Commit with clear, descriptive messages (prefer `feat:`, `fix:`, `docs:` prefixes)
 4. Push to your fork and open a Pull Request

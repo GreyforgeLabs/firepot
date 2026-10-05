@@ -15,7 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Deprecated
 
-- The `node-healthcheck` name keeps working for this release only. `bin/node-healthcheck` stays in the repository as a symlink to `bin/firepot`. Invoked through the old name, the script prints a one-line deprecation note to stderr and then behaves identically. Remote hosts in fleet mode never print it.
+- The `node-healthcheck` name keeps working for this release only. `bin/node-healthcheck` stays in the repository as an identical copy of `bin/firepot`, so the old raw download URL keeps serving the script. Invoked through the old name, the script prints a one-line deprecation note to stderr and then behaves identically. Remote hosts in fleet mode never print it.
 - `NODE_HEALTHCHECK_PROC`, `NODE_HEALTHCHECK_ROOT`, and `NODE_HEALTHCHECK_INSTALL_DIR` are still read as fallbacks when the `FIREPOT_*` variable is unset.
 
 ### Compatibility

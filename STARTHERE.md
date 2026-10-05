@@ -18,7 +18,7 @@ A single bash script that checks a Linux host (load, memory, swap, disk, inodes,
 ```text
 firepot/
   bin/firepot                 # the tool; a single bash file
-  bin/node-healthcheck        # deprecated alias: symlink to firepot (pre-1.2.0 name)
+  bin/node-healthcheck        # deprecated alias: identical copy of firepot (pre-1.2.0 name)
   examples/
     firepot.conf              # documented key=value config
   tests/

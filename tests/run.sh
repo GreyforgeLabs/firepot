@@ -311,7 +311,8 @@ assert_contains "$(jget "$OUT" 'd["nodes"][0]["checks"][0]["summary"]')" "inacti
 
 begin "deprecated node-healthcheck alias and pre-rename compatibility"
 reset_env
-assert_eq firepot "$(readlink "$LEGACY")" "bin/node-healthcheck is a relative symlink to firepot"
+assert_eq "" "$(readlink "$LEGACY" || true)" "bin/node-healthcheck is a regular file, not a symlink (raw URLs must serve the script)"
+if cmp -s "$SCRIPT" "$LEGACY"; then assert_eq same same "bin/node-healthcheck is byte-identical to bin/firepot"; else assert_eq same differs "bin/node-healthcheck is byte-identical to bin/firepot (run: cp bin/firepot bin/node-healthcheck)"; fi
 run_nhc --json --check load,memory
 cp "$OUT" "$TMP/new-name.json"
 assert_eq 1.2.0 "$(jget "$OUT" 'd["node-healthcheck"]')" "JSON keeps the node-healthcheck version key"

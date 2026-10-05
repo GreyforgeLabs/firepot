@@ -173,7 +173,7 @@ The script is sent to each host on standard input (`ssh host bash -s -- <flags>`
 
 `firepot` 1.2.0 is the first release under the new name. Releases 1.0.0 and 1.1.0 shipped as `node-healthcheck`. For one release, the old name keeps working:
 
-- `bin/node-healthcheck` is a symlink to `bin/firepot`, and `scripts/setup.sh` also links `node-healthcheck` into the install directory (set `FIREPOT_LEGACY_LINK=0` to skip it). Invoked through the old name, the script prints a one-line deprecation note to stderr and then behaves identically. Fleet runs never print the note on remote hosts, so remote reports stay clean.
+- `bin/node-healthcheck` is an identical copy of `bin/firepot` (a real file, so the old raw download URL still serves the script), and `scripts/setup.sh` also links `node-healthcheck` into the install directory (set `FIREPOT_LEGACY_LINK=0` to skip it). Invoked through the old name, the script prints a one-line deprecation note to stderr and then behaves identically. Fleet runs never print the note on remote hosts, so remote reports stay clean.
 - The `FIREPOT_PROC`, `FIREPOT_ROOT`, and `FIREPOT_INSTALL_DIR` variables replace the `NODE_HEALTHCHECK_*` names, which are still read as fallbacks.
 - The JSON version key stays `"node-healthcheck"`.
 
