@@ -21,7 +21,6 @@ check_command() {
 }
 
 check_command bash
-check_command awk
 check_command df
 
 if (( BASH_VERSINFO[0] < 4 )); then

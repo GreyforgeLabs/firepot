@@ -8,6 +8,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 SCRIPT="$ROOT/bin/firepot"
 LEGACY="$ROOT/bin/node-healthcheck"
+VERSION="$(sed -n 's/^NHC_VERSION="\(.*\)"$/\1/p' "$SCRIPT")"
 TMP="$HERE/.tmp"
 rm -rf "$TMP"
 mkdir -p "$TMP"
@@ -79,24 +80,30 @@ shim() { # name, then body
 shim hostname 'printf "%s\n" "${FAKE_HOSTNAME:-testnode}"'
 shim uname 'echo 6.1.0-test'
 shim nproc 'echo 4'
-shim df 'for a in "$@"; do case "$a" in -i) cat "$FAKE_DF_I"; exit 0 ;; esac; done
+shim df '[[ -n "${FAKE_DF_HANG:-}" ]] && exec sleep 30
+for a in "$@"; do case "$a" in -i) cat "$FAKE_DF_I"; exit 0 ;; esac; done
 if [[ "$*" == *"--"* ]]; then m="${@: -1}"; awk -v m="$m" "NR==1 || \$NF==m" "$FAKE_DF_K"; exit 0; fi
 cat "$FAKE_DF_K"'
 shim ip 'case "$*" in
   *addr*) printf "1: lo    inet 127.0.0.1/8 scope host lo\n2: eth0    inet 203.0.113.5/24 brd 203.0.113.255 scope global eth0\n" ;;
-  *route*) printf "default via 203.0.113.1 dev eth0 proto dhcp\n" ;;
+  *route*) printf "%b" "${FAKE_ROUTE:-default via 203.0.113.1 dev eth0 proto dhcp\\n}" ;;
 esac'
 shim ping 'target="${@: -1}"; for bad in ${FAKE_PING_FAIL:-}; do [[ "$target" == "$bad" ]] && exit 1; done; exit 0'
 shim getent 'case "$2" in good.example) echo "203.0.113.9 STREAM good.example"; echo "203.0.113.9 DGRAM";; *) exit 2;; esac'
 shim systemctl 'if [[ "$*" == *"--state=failed"* ]]; then [[ -n "${FAKE_FAILED_UNITS:-}" ]] && printf "%s\n" $FAKE_FAILED_UNITS; exit 0; fi
-unit="${@: -1}"; case "$unit" in good|good2|user-good) exit 0;; *) exit 3;; esac'
-shim ss 'printf "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nLISTEN 0 128 [::]:8080 [::]:*\n"'
+quiet=0; units=(); for a in "$@"; do case "$a" in --quiet) quiet=1 ;; --user|--|is-active) ;; *) units+=("$a") ;; esac; done
+(( quiet == 0 && ${#units[@]} > 1 )) && [[ -n "${FAKE_SYSTEMCTL_NOBATCH:-}" ]] && exit 1
+rc=3; for u in "${units[@]}"; do case "$u" in good|good2|user-good) s=active; rc=0 ;; *) s=inactive ;; esac; (( quiet )) || echo "$s"; done
+exit "$rc"'
+shim ss 'case "$*" in *-H*) [[ -n "${FAKE_SS_OLD:-}" ]] && { echo "ss: invalid option -- H" >&2; exit 1; } ;; *) echo "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process" ;; esac
+printf "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nLISTEN 0 128 [::]:8080 [::]:*\n"'
 shim timedatectl 'echo "${FAKE_NTP:-yes}"'
 shim who 'printf "alice pts/0 2026-09-06 10:00\nbob pts/1 2026-09-06 10:05\n"'
 shim ssh '# Simulates a remote host by running the piped script locally.
 host=""; while [[ $# -gt 0 ]]; do case "$1" in -o) shift 2; continue;; --) shift; host="$1"; shift; break;; *) shift;; esac; done
 [[ "$host" == "down.example" ]] && exit 255
 [[ "$host" == "bad-report.example" ]] && { printf "%s\n" "{not-json"; exit 0; }
+[[ "$host" == "usage.example" ]] && { echo "firepot: unknown option" >&2; exit 3; }
 export FAKE_HOSTNAME="$host"
 exec bash -c "$1"'
 
@@ -104,7 +111,7 @@ run_nhc() { # args... -> stdout captured to $OUT, exit code in $RC
     OUT="$TMP/out.txt"
     set +e
     PATH="$BIN:$PATH" FIREPOT_PROC="$PROC" FIREPOT_ROOT="$FSROOT" \
-        FAKE_DF_K="$FIX/df-k.txt" FAKE_DF_I="$FIX/df-i.txt" \
+        FAKE_DF_K="${DF_K:-$FIX/df-k.txt}" FAKE_DF_I="$FIX/df-i.txt" \
         "${NHC_ENTRY:-$SCRIPT}" "$@" > "$OUT" 2> "$TMP/err.txt"
     RC=$?
     set -e
@@ -123,13 +130,13 @@ run_legacy_env() { # pre-rename NODE_HEALTHCHECK_* variables only
 reset_env() {
     healthy_proc
     rm -rf "$FSROOT"; mkdir -p "$FSROOT"
-    unset FAKE_PING_FAIL FAKE_FAILED_UNITS FAKE_NTP FAKE_HOSTNAME
+    unset FAKE_PING_FAIL FAKE_FAILED_UNITS FAKE_NTP FAKE_HOSTNAME DF_K
 }
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
 begin "version and help"
-run_nhc --version; assert_eq 0 "$RC" "exit"; assert_eq "firepot 1.2.0" "$(cat "$OUT")" "version"
+run_nhc --version; assert_eq 0 "$RC" "exit"; assert_eq "firepot $VERSION" "$(cat "$OUT")" "version"
 assert_eq "" "$(cat "$TMP/err.txt")" "no stderr under the new name"
 run_nhc --help; assert_eq 0 "$RC" "exit"; assert_contains "$(cat "$OUT")" "Exit codes" "help"
 
@@ -246,6 +253,22 @@ run_nhc --nope; assert_eq 3 "$RC" "unknown option"
 run_nhc --services; assert_eq 3 "$RC" "missing value"
 assert_contains "$(cat "$TMP/err.txt")" "requires a value" "missing value message"
 
+begin "long options and config keys share one table"
+reset_env
+for opt in --hosts --checks --warn_load --nope; do
+    run_nhc "$opt" x; assert_eq 3 "$RC" "$opt is rejected"
+    assert_contains "$(cat "$TMP/err.txt")" "unknown option: $opt" "$opt message"
+done
+run_nhc --nope; assert_contains "$(cat "$TMP/err.txt")" "unknown option" "unknown option named before value check"
+printf '$(touch %s/pwned-key) = 1\n' "$TMP" > "$TMP/evil-key.conf"
+run_nhc --config "$TMP/evil-key.conf"; assert_eq 3 "$RC" "hostile config key rejected"
+if [[ -e "$TMP/pwned-key" ]]; then fail "config key executed a command"; else pass; fi
+printf '= 1\n' > "$TMP/empty-key.conf"
+run_nhc --config "$TMP/empty-key.conf"; assert_eq 3 "$RC" "empty config key rejected"
+assert_contains "$(cat "$TMP/err.txt")" "unknown config key" "empty key message"
+run_nhc --json --host node-a --check disk --warn-disk 95 --crit-disk 99
+assert_eq 0 "$RC" "threshold flags reach the remote"
+
 begin "config file is parsed, not sourced"
 reset_env
 cat > "$TMP/test.conf" <<'CONF'
@@ -309,13 +332,136 @@ run_nhc --json --host node-a --config "$TMP/test.conf" --check services
 assert_eq 2 "$RC" "config lists forwarded to remote"
 assert_contains "$(jget "$OUT" 'd["nodes"][0]["checks"][0]["summary"]')" "inactive: bad" "remote used config services"
 
+begin "fleet mode accepts the full default check set"
+reset_env
+run_nhc --json --host node-a --mounts / --skip inodes
+assert_eq 0 "$RC" "default checks over ssh (sessions and swap report info)"
+assert_eq "" "$(jget "$OUT" 'd["nodes"][0].get("error", "")')" "no validation error"
+assert_eq 17 "$(jget "$OUT" 'len(d["nodes"][0]["checks"])')" "all remote checks kept"
+run_nhc --json --host usage.example --check load
+assert_eq 2 "$RC" "remote usage error is critical"
+assert_eq "remote run failed with exit 3" "$(jget "$OUT" 'd["nodes"][0]["error"]')" "remote exit 3 is not reported as an ssh failure"
+run_nhc --no-color --host node-a --check services --services 'a"b'
+assert_contains "$(cat "$OUT")" '[crit] services: inactive: a"b (0/1 active)' "text fleet summary decodes JSON escapes"
+
+begin "lists are never glob-expanded"
+reset_env
+mkdir -p "$TMP/globdir"; touch "$TMP/globdir/good"
+( cd "$TMP/globdir" && run_nhc --json --check services --services '*' && cp "$OUT" "$TMP/glob.json"; echo "$RC" > "$TMP/glob.rc" )
+assert_eq 2 "$(cat "$TMP/glob.rc")" "'*' is a unit name, not the files in the working directory"
+assert_eq "['*']" "$(jget "$TMP/glob.json" 'list(d["checks"][0]["metrics"])')" "literal pattern kept"
+run_nhc --json --check services --services 'good,,good2, ,'
+assert_eq 0 "$RC" "empty list items are dropped"
+assert_eq 2 "$(jget "$OUT" 'len(d["checks"][0]["metrics"])')" "two units"
+
+begin "core count comes from online CPUs, not affinity or OMP_NUM_THREADS"
+reset_env
+mkdir -p "$FSROOT/sys/devices/system/cpu"; echo "0-3,6,8-9" > "$FSROOT/sys/devices/system/cpu/online"
+echo "3.50 1.00 1.00 1/200 1" > "$PROC/loadavg"
+OMP_NUM_THREADS=1 run_nhc --json --check load
+assert_eq 7 "$(jget "$OUT" 'd["checks"][0]["metrics"]["cores"]')" "cores from sysfs ranges"
+assert_eq 0.5 "$(jget "$OUT" 'd["checks"][0]["metrics"]["load1_per_core"]')" "per-core load"
+assert_eq 0 "$RC" "not inflated by OMP_NUM_THREADS"
+
+begin "kernel facts are read from /proc when present"
+reset_env
+mkdir -p "$PROC/sys/kernel"; echo "proc-host" > "$PROC/sys/kernel/hostname"; echo "6.9.9-proc" > "$PROC/sys/kernel/osrelease"
+run_nhc --json --check system
+assert_eq proc-host "$(jget "$OUT" 'd["host"]')" "hostname from /proc"
+assert_eq 6.9.9-proc "$(jget "$OUT" 'd["checks"][0]["metrics"]["kernel"]')" "kernel from /proc"
+rm -rf "$PROC/sys"
+
+begin "string metrics stay strings and JSON stays valid"
+reset_env
+FAKE_HOSTNAME=007 run_nhc --json --check system
+assert_json_valid "$OUT" "digits-only hostname with a leading zero"
+assert_eq "<class 'str'>" "$(jget "$OUT" 'type(d["checks"][0]["metrics"]["hostname"])')" "hostname metric is a string"
+FAKE_HOSTNAME=$'ctl\033[31mchars\001' run_nhc --json --check system
+assert_json_valid "$OUT" "control characters dropped"
+assert_eq "ctl[31mchars" "$(jget "$OUT" 'd["host"]')" "control characters removed"
+
+begin "mount points with spaces or '=' keep their names"
+reset_env
+cp "$FIX/df-k.txt" "$TMP/df-odd.txt"
+printf '%s\n' "/dev/sdb1 1000 500 500 50% /run/media/u/My Disk" "/dev/sdc1 1000 950 50 95% /mnt/a=b" >> "$TMP/df-odd.txt"
+DF_K="$TMP/df-odd.txt" run_nhc --json --check disk
+assert_eq 50 "$(jget "$OUT" 'd["checks"][0]["metrics"]["/run/media/u/My Disk"]')" "spaced mount point"
+assert_eq 95 "$(jget "$OUT" 'd["checks"][0]["metrics"]["/mnt/a=b"]')" "mount point containing '='"
+assert_contains "$(jget "$OUT" 'd["checks"][0]["summary"]')" "/mnt/a=b 95%" "summary names it"
+
+begin "a hung df is reported, not waited on"
+reset_env
+start=$SECONDS
+FAKE_DF_HANG=1 FIREPOT_PROBE_TIMEOUT=1 run_nhc --json --check disk
+assert_eq 2 "$RC" "hung df is critical"
+assert_contains "$(jget "$OUT" 'd["checks"][0]["summary"]')" "did not answer within 1s" "hang summary"
+FAKE_DF_HANG=1 FIREPOT_PROBE_TIMEOUT=1 run_nhc --json --check disk --mounts /nfs
+assert_eq 2 "$RC" "hung requested mount is critical"
+assert_contains "$(jget "$OUT" 'd["checks"][0]["summary"]')" "no answer within 1s: /nfs" "hung mount named"
+if (( SECONDS - start < 15 )); then pass; else fail "df hang was not bounded"; fi
+FIREPOT_PROBE_TIMEOUT=abc run_nhc --json --check disk; assert_eq 3 "$RC" "invalid probe timeout"
+
+begin "gateway handles point-to-point and multipath default routes"
+reset_env
+FAKE_ROUTE='default dev wg0 scope link\n' run_nhc --json --check gateway
+assert_eq 0 "$RC" "point-to-point default route is not an unreachable gateway"
+assert_eq info "$(jget "$OUT" 'd["checks"][0]["status"]')" "p2p status"
+assert_eq wg0 "$(jget "$OUT" 'd["checks"][0]["metrics"]["interface"]')" "p2p interface"
+FAKE_ROUTE='default proto static metric 100\n\tnexthop via 203.0.113.7 dev eth0 weight 1\n\tnexthop via 203.0.113.8 dev eth1 weight 1\n' \
+    run_nhc --json --check gateway
+assert_eq 203.0.113.7 "$(jget "$OUT" 'd["checks"][0]["metrics"]["gateway"]')" "first multipath next hop"
+FAKE_ROUTE='default via 203.0.113.1 dev eth0 metric 100\ndefault via 203.0.113.99 dev eth1 metric 200\n' \
+    run_nhc --json --check gateway
+assert_eq 203.0.113.1 "$(jget "$OUT" 'd["checks"][0]["metrics"]["gateway"]')" "first of several default routes"
+FAKE_ROUTE=' ' run_nhc --json --check gateway
+assert_eq 1 "$RC" "no default route warns"
+
+begin "ports, units, and probes across tool versions"
+reset_env
+run_nhc --json --check ports --ports 022,8080; assert_eq 0 "$RC" "leading zeros normalised"
+assert_eq "['22', '8080']" "$(jget "$OUT" 'list(d["checks"][0]["metrics"])')" "normalised port keys"
+run_nhc --json --check ports --ports 70000; assert_eq 3 "$RC" "out-of-range port is a usage error"
+FAKE_SS_OLD=1 run_nhc --json --check ports --ports 22; assert_eq 0 "$RC" "works with ss that lacks -H"
+FAKE_SYSTEMCTL_NOBATCH=1 run_nhc --json --check services --services good,bad
+assert_eq 2 "$RC" "per-unit fallback exit"
+assert_eq "{'good': 1, 'bad': 0}" "$(jget "$OUT" 'd["checks"][0]["metrics"]')" "per-unit fallback states"
+FAKE_PING_FAIL="203.0.113.2 203.0.113.4" run_nhc --json --check peers --peers 203.0.113.1,203.0.113.2,203.0.113.3,203.0.113.4
+assert_eq "{'203.0.113.1': 1, '203.0.113.2': 0, '203.0.113.3': 1, '203.0.113.4': 0}" "$(jget "$OUT" 'd["checks"][0]["metrics"]')" "parallel pings keep peer order"
+for i in 301 302; do mkdir -p "$PROC/$i"; printf 'Name:\tz\nState:\tZ (zombie)\n' > "$PROC/$i/status"; done
+set +e
+PATH="$MIN_BIN" FIREPOT_PROC="$PROC" "$SCRIPT" --json --check zombies > "$TMP/min-out.txt" 2>/dev/null
+set -e
+assert_eq skip "$(jget "$TMP/min-out.txt" 'd["checks"][0]["status"]')" "zombies without grep is a clean skip"
+
+begin "runtime edge cases keep the exit-code contract"
+reset_env
+: > "$PROC/loadavg"
+run_nhc --json --check load
+assert_eq 0 "$RC" "empty loadavg is a skip, not a crash"
+assert_eq skip "$(jget "$OUT" 'd["checks"][0]["status"]')" "empty loadavg status"
+printf 'MemTotal: 1000 kB\nSwapTotal: 1000 kB\n' > "$PROC/meminfo"
+run_nhc --json --check memory,swap
+assert_eq 0 "$RC" "incomplete meminfo exit"
+assert_eq "skip skip" "$(jget "$OUT" '" ".join(c["status"] for c in d["checks"])')" "incomplete meminfo skips"
+reset_env
+sed 's/^check_zombies() {/check_zombies() { false/' "$SCRIPT" > "$TMP/crashy"; chmod +x "$TMP/crashy"
+NHC_ENTRY="$TMP/crashy" run_nhc --json --check load,zombies
+assert_eq 3 "$RC" "an unexpected failure exits 3, never a health state"
+assert_contains "$(cat "$TMP/err.txt")" "unexpected runtime error" "runtime error message"
+run_nhc --check load -- extra; assert_eq 3 "$RC" "argument after -- is rejected"
+run_nhc --warn-load 1234567890; assert_eq 3 "$RC" "threshold out of range"
+run_nhc --json --check load --warn-load 0.125 --crit-load 9; assert_eq 0 "$RC" "fractional thresholds"
+run_nhc --json --check load --warn-load 0.1 --crit-load 9; assert_eq 1 "$RC" "value equal to threshold warns"
+run_nhc --json --check load --warn-load -1 --crit-load 0.2; assert_eq 1 "$RC" "negative warn threshold"
+run_nhc --json --check load --warn-load -0.5 --crit-load -0.25; assert_eq 2 "$RC" "negative crit threshold"
+
 begin "deprecated node-healthcheck alias and pre-rename compatibility"
 reset_env
 assert_eq "" "$(readlink "$LEGACY" || true)" "bin/node-healthcheck is a regular file, not a symlink (raw URLs must serve the script)"
 if cmp -s "$SCRIPT" "$LEGACY"; then assert_eq same same "bin/node-healthcheck is byte-identical to bin/firepot"; else assert_eq same differs "bin/node-healthcheck is byte-identical to bin/firepot (run: cp bin/firepot bin/node-healthcheck)"; fi
 run_nhc --json --check load,memory
 cp "$OUT" "$TMP/new-name.json"
-assert_eq 1.2.0 "$(jget "$OUT" 'd["node-healthcheck"]')" "JSON keeps the node-healthcheck version key"
+assert_eq "$VERSION" "$(jget "$OUT" 'd["node-healthcheck"]')" "JSON keeps the node-healthcheck version key"
 NHC_ENTRY="$LEGACY" run_nhc --json --check load,memory
 assert_eq 0 "$RC" "alias exit"
 assert_json_valid "$OUT" "alias json"
@@ -325,14 +471,14 @@ assert_eq 1 "$(grep -c . "$TMP/err.txt")" "alias prints exactly one stderr line"
 assert_contains "$(cat "$TMP/err.txt")" "deprecated" "alias deprecation note"
 assert_contains "$(cat "$TMP/err.txt")" "firepot" "alias names the new tool"
 NHC_ENTRY="$LEGACY" run_nhc --version
-assert_eq "firepot 1.2.0" "$(cat "$OUT")" "alias version on stdout is unchanged"
+assert_eq "firepot $VERSION" "$(cat "$OUT")" "alias version on stdout is unchanged"
 ALIAS_DIR="$TMP/alias-bin"; mkdir -p "$ALIAS_DIR"; ln -s "$SCRIPT" "$ALIAS_DIR/node-healthcheck"
 NHC_ENTRY="$ALIAS_DIR/node-healthcheck" run_nhc --version
 assert_contains "$(cat "$TMP/err.txt")" "deprecated" "installed absolute alias link also warns"
 NHC_ENTRY="$LEGACY" run_nhc --json --host node-a --host node-b --check load
 assert_eq 0 "$RC" "fleet via alias"
 assert_json_valid "$OUT" "fleet via alias json"
-assert_eq "1.2.0 1.2.0" "$(jget "$OUT" '" ".join(n["node-healthcheck"] for n in d["nodes"])')" "remote reports keep the version key"
+assert_eq "$VERSION $VERSION" "$(jget "$OUT" '" ".join(n["node-healthcheck"] for n in d["nodes"])')" "remote reports keep the version key"
 assert_eq "" "$(jget "$OUT" '" ".join(n.get("error", "") for n in d["nodes"]).strip()')" "remote reports validate"
 assert_eq 1 "$(grep -c . "$TMP/err.txt")" "fleet via alias: one local note"
 # Remotes receive the file on stdin exactly as run_remote sends it ("bash -s").
@@ -342,12 +488,12 @@ stream_rc=$?
 set -e
 assert_eq 0 "$stream_rc" "streamed run exit"
 assert_eq "" "$(cat "$TMP/stream-err.txt")" "streamed (remote) run prints no deprecation note"
-assert_contains "$stream_out" '"node-healthcheck":"1.2.0"' "streamed run keeps the version key"
+assert_contains "$stream_out" "\"node-healthcheck\":\"$VERSION\"" "streamed run keeps the version key"
 LEGACY_SSH_BIN="$TMP/legacy-ssh-bin"; mkdir -p "$LEGACY_SSH_BIN"
-cat > "$LEGACY_SSH_BIN/ssh" <<'SSH'
+cat > "$LEGACY_SSH_BIN/ssh" <<SSH
 #!/usr/bin/env bash
 # A remote whose report carries only the key a hypothetical future emitter might use.
-printf '{"firepot":"1.2.0","host":"node-f","status":"ok","exit_code":0,"checks":[]}\n'
+printf '{"firepot":"$VERSION","host":"node-f","status":"ok","exit_code":0,"checks":[]}\\n'
 SSH
 chmod +x "$LEGACY_SSH_BIN/ssh"
 set +e

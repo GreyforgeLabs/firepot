@@ -12,23 +12,33 @@
 # shellcheck disable=SC2329,SC2317
 
 set -euo pipefail
+# Parse every probe's output in one predictable locale.
+export LC_ALL=C
 
-NHC_VERSION="1.2.0"
+NHC_VERSION="1.2.1"
+
+# Any exit that does not go through finish() is an unexpected runtime error,
+# which the exit-code contract reports as 3 (never as a health state).
+FP_DONE=0
+trap '(( FP_DONE )) || { echo "firepot: unexpected runtime error" >&2; exit 3; }' EXIT
+# shellcheck disable=SC2034  # read by the EXIT trap
+finish() { FP_DONE=1; exit "$1"; }
 
 # Deprecated alias: the tool was called node-healthcheck before 1.2.0, and that
-# name keeps working for one release. Invoking it through the old name prints
-# one note to stderr (never stdout) and then behaves identically. Fleet mode
-# streams this file to each remote over "bash -s", where $0 is the remote
-# shell rather than this file, so remote runs never print the note and remote
-# reports stay clean.
+# name keeps working for now. Invoking it through the old name prints one note
+# to stderr (never stdout) and then behaves identically. Fleet mode streams
+# this file to each remote over "bash -s", where $0 is the remote shell rather
+# than this file, so remote runs never print the note and remote reports stay clean.
 if [[ "${0##*/}" == "node-healthcheck" ]]; then
-    echo "node-healthcheck: deprecated name; this tool is now firepot and the old name will be removed in the next release" >&2
+    echo "node-healthcheck: deprecated name; this tool is now firepot and the old name will be removed in a future release" >&2
 fi
 
 # Roots are overridable so the check logic can be exercised against fixtures.
 # FIREPOT_* wins; the pre-rename NODE_HEALTHCHECK_* names remain as fallbacks.
 PROC_ROOT="${FIREPOT_PROC:-${NODE_HEALTHCHECK_PROC:-/proc}}"
 FS_ROOT="${FIREPOT_ROOT:-${NODE_HEALTHCHECK_ROOT:-}}"
+# Deadline for df, so a hung mount is reported instead of hanging the run.
+PROBE_TIMEOUT="${FIREPOT_PROBE_TIMEOUT:-10}"
 
 ALL_CHECKS="system load memory swap disk inodes network gateway dns services user_services ports peers failed_units time_sync reboot_required sessions zombies"
 
@@ -40,10 +50,15 @@ WARN_DISK="80"; CRIT_DISK="90"
 WARN_INODES="80"; CRIT_INODES="90"
 WARN_ZOMBIES="5"; CRIT_ZOMBIES="50"
 
-SERVICES=""; USER_SERVICES=""; PORTS=""; PEERS=""; DNS_NAME=""; MOUNTS=""
+SERVICES=""; USER_SERVICES=""; PORTS=""; PEERS=""; DNS=""; MOUNTS=""
 CHECKS=""; SKIP=""; HOSTS=""
 JSON=0; QUIET=0; COLOR=1; PING_TIMEOUT="1"; SSH_TIMEOUT="10"; SSH_OPTS=""
-CONFIG_FILE=""
+
+# Config keys; each sets the variable of the same name in upper case, and each
+# except checks and hosts is also a long option (warn_load <-> --warn-load).
+KEYS="services user_services ports peers dns mounts checks skip hosts ssh_opts ssh_timeout ping_timeout"
+KEYS+=" warn_load crit_load warn_mem crit_mem warn_swap crit_swap warn_disk crit_disk warn_inodes crit_inodes warn_zombies crit_zombies"
+is_key() { [[ " $KEYS " == *" $1 "* ]]; }
 
 usage() {
     cat <<USAGE
@@ -87,7 +102,7 @@ Exit codes: 0 healthy, 1 warning, 2 critical, 3 usage or runtime error.
 USAGE
 }
 
-die() { echo "firepot: $*" >&2; exit 3; }
+die() { echo "firepot: $*" >&2; finish 3; }
 
 # ── Config file (parsed, never sourced) ──────────────────────────────────────
 
@@ -104,27 +119,8 @@ load_config() {
         key="${key%"${key##*[![:space:]]}"}"
         value="${value#"${value%%[![:space:]]*}"}"
         value="${value%\"}"; value="${value#\"}"
-        case "$key" in
-            services) SERVICES="$value" ;;
-            user_services) USER_SERVICES="$value" ;;
-            ports) PORTS="$value" ;;
-            peers) PEERS="$value" ;;
-            dns) DNS_NAME="$value" ;;
-            mounts) MOUNTS="$value" ;;
-            checks) CHECKS="$value" ;;
-            skip) SKIP="$value" ;;
-            hosts) HOSTS="$value" ;;
-            ssh_opts) SSH_OPTS="$value" ;;
-            ssh_timeout) SSH_TIMEOUT="$value" ;;
-            ping_timeout) PING_TIMEOUT="$value" ;;
-            warn_load) WARN_LOAD="$value" ;;   crit_load) CRIT_LOAD="$value" ;;
-            warn_mem) WARN_MEM="$value" ;;     crit_mem) CRIT_MEM="$value" ;;
-            warn_swap) WARN_SWAP="$value" ;;   crit_swap) CRIT_SWAP="$value" ;;
-            warn_disk) WARN_DISK="$value" ;;   crit_disk) CRIT_DISK="$value" ;;
-            warn_inodes) WARN_INODES="$value" ;; crit_inodes) CRIT_INODES="$value" ;;
-            warn_zombies) WARN_ZOMBIES="$value" ;; crit_zombies) CRIT_ZOMBIES="$value" ;;
-            *) die "unknown config key: $key" ;;
-        esac
+        is_key "$key" || die "unknown config key: $key"
+        printf -v "${key^^}" '%s' "$value"
     done < "$file"
 }
 
@@ -132,107 +128,87 @@ load_config() {
 
 need_value() { [[ $# -ge 2 ]] || die "$1 requires a value"; }
 
-ORIGINAL_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help) usage; exit 0 ;;
-        -V|--version) echo "firepot ${NHC_VERSION}"; exit 0 ;;
+        -h|--help) usage; finish 0 ;;
+        -V|--version) echo "firepot ${NHC_VERSION}"; finish 0 ;;
         --json) JSON=1 ;;
         --quiet) QUIET=1 ;;
         --no-color) COLOR=0 ;;
-        --config) need_value "$@"; CONFIG_FILE="$2"; load_config "$2"; shift ;;
+        --config) need_value "$@"; load_config "$2"; shift ;;
         --check) need_value "$@"; CHECKS="$2"; shift ;;
-        --skip) need_value "$@"; SKIP="$2"; shift ;;
-        --services) need_value "$@"; SERVICES="$2"; shift ;;
-        --user-services) need_value "$@"; USER_SERVICES="$2"; shift ;;
-        --ports) need_value "$@"; PORTS="$2"; shift ;;
-        --peers) need_value "$@"; PEERS="$2"; shift ;;
-        --dns) need_value "$@"; DNS_NAME="$2"; shift ;;
-        --mounts) need_value "$@"; MOUNTS="$2"; shift ;;
         --host) need_value "$@"; HOSTS="${HOSTS:+$HOSTS,}$2"; shift ;;
-        --ssh-opts) need_value "$@"; SSH_OPTS="$2"; shift ;;
-        --ssh-timeout) need_value "$@"; SSH_TIMEOUT="$2"; shift ;;
-        --ping-timeout) need_value "$@"; PING_TIMEOUT="$2"; shift ;;
-        --warn-load) need_value "$@"; WARN_LOAD="$2"; shift ;;
-        --crit-load) need_value "$@"; CRIT_LOAD="$2"; shift ;;
-        --warn-mem) need_value "$@"; WARN_MEM="$2"; shift ;;
-        --crit-mem) need_value "$@"; CRIT_MEM="$2"; shift ;;
-        --warn-swap) need_value "$@"; WARN_SWAP="$2"; shift ;;
-        --crit-swap) need_value "$@"; CRIT_SWAP="$2"; shift ;;
-        --warn-disk) need_value "$@"; WARN_DISK="$2"; shift ;;
-        --crit-disk) need_value "$@"; CRIT_DISK="$2"; shift ;;
-        --warn-inodes) need_value "$@"; WARN_INODES="$2"; shift ;;
-        --crit-inodes) need_value "$@"; CRIT_INODES="$2"; shift ;;
-        --warn-zombies) need_value "$@"; WARN_ZOMBIES="$2"; shift ;;
-        --crit-zombies) need_value "$@"; CRIT_ZOMBIES="$2"; shift ;;
+        --?*)
+            key="${1#--}"; key="${key//-/_}"
+            if [[ "$1" == *_* || "$key" == checks || "$key" == hosts ]] || ! is_key "$key"; then die "unknown option: $1 (see --help)"; fi
+            need_value "$@"; printf -v "${key^^}" '%s' "$2"; shift ;;
         --) shift; break ;;
         -*) die "unknown option: $1 (see --help)" ;;
         *) die "unexpected argument: $1" ;;
     esac
     shift
 done
+[[ $# -eq 0 ]] || die "unexpected argument: $1"
 
-is_number() { [[ "$1" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; }
 is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
+# A JSON number literal (no leading zeros), which record() can emit unquoted.
+is_json_number() { [[ "$1" =~ ^-?(0|[1-9][0-9]*)([.][0-9]+)?$ ]]; }
 
-for pair in "WARN_LOAD:$WARN_LOAD" "CRIT_LOAD:$CRIT_LOAD" "WARN_MEM:$WARN_MEM" "CRIT_MEM:$CRIT_MEM" \
-            "WARN_SWAP:$WARN_SWAP" "CRIT_SWAP:$CRIT_SWAP" "WARN_DISK:$WARN_DISK" "CRIT_DISK:$CRIT_DISK" \
-            "WARN_INODES:$WARN_INODES" "CRIT_INODES:$CRIT_INODES" "PING_TIMEOUT:$PING_TIMEOUT" "SSH_TIMEOUT:$SSH_TIMEOUT"; do
-    is_number "${pair#*:}" || die "${pair%%:*} must be numeric, got '${pair#*:}'"
+# Thresholds are compared with exact integer arithmetic, so they are bounded to
+# nine integer and nine fractional digits.
+for v in WARN_LOAD CRIT_LOAD WARN_MEM CRIT_MEM WARN_SWAP CRIT_SWAP WARN_DISK CRIT_DISK \
+         WARN_INODES CRIT_INODES PING_TIMEOUT SSH_TIMEOUT PROBE_TIMEOUT; do
+    [[ "${!v}" =~ ^-?[0-9]{1,9}([.][0-9]{1,9})?$ ]] || die "$v must be numeric, got '${!v}'"
 done
-for pair in "WARN_ZOMBIES:$WARN_ZOMBIES" "CRIT_ZOMBIES:$CRIT_ZOMBIES"; do
-    is_int "${pair#*:}" || die "${pair%%:*} must be an integer, got '${pair#*:}'"
+for v in WARN_ZOMBIES CRIT_ZOMBIES; do
+    [[ "${!v}" =~ ^[0-9]{1,18}$ ]] || die "$v must be an integer, got '${!v}'"
 done
 
 # ── Check selection ──────────────────────────────────────────────────────────
 
+# split_list LIST: comma or whitespace separated -> LIST array, blanks dropped.
+# Items are never glob-expanded.
 split_list() {
-    # Comma or whitespace separated -> one item per line, blanks dropped.
-    local IFS=$', \t\n'
-    for item in $1; do printf '%s\n' "$item"; done
+    local IFS=$', \t\n' item items=()
+    read -r -d '' -a items <<< "$1" || true
+    LIST=()
+    for item in "${items[@]+"${items[@]}"}"; do [[ -z "$item" ]] || LIST+=("$item"); done
 }
 
-known_check() {
-    local c
-    for c in $ALL_CHECKS; do [[ "$c" == "$1" ]] && return 0; done
-    return 1
-}
+known_check() { [[ " $ALL_CHECKS " == *" $1 "* ]]; }
 
 SELECTED=()
 if [[ -n "$CHECKS" ]]; then
-    while IFS= read -r c; do
+    split_list "$CHECKS"
+    for c in "${LIST[@]+"${LIST[@]}"}"; do
         known_check "$c" || die "unknown check: $c"
         SELECTED+=("$c")
-    done < <(split_list "$CHECKS")
+    done
 else
-    for c in $ALL_CHECKS; do SELECTED+=("$c"); done
+    read -r -a SELECTED <<< "$ALL_CHECKS"
 fi
 if [[ -n "$SKIP" ]]; then
-    while IFS= read -r s; do
-        known_check "$s" || die "unknown check in --skip: $s"
-        filtered=()
-        for c in "${SELECTED[@]}"; do [[ "$c" != "$s" ]] && filtered+=("$c"); done
-        SELECTED=("${filtered[@]+"${filtered[@]}"}")
-    done < <(split_list "$SKIP")
+    split_list "$SKIP"
+    for s in "${LIST[@]+"${LIST[@]}"}"; do known_check "$s" || die "unknown check in --skip: $s"; done
+    skipped=" ${LIST[*]+"${LIST[*]}"} "; filtered=()
+    for c in "${SELECTED[@]+"${SELECTED[@]}"}"; do [[ "$skipped" == *" $c "* ]] || filtered+=("$c"); done
+    SELECTED=("${filtered[@]+"${filtered[@]}"}")
 fi
 
-# ── JSON helpers (no jq dependency) ──────────────────────────────────────────
+# ── JSON helpers (no jq dependency, no subshells) ────────────────────────────
 
-json_str() {
-    # Escape a string for JSON. Control characters other than \n \r \t are
-    # rare in this output and are dropped rather than emitted raw.
-    local s="$1"
-    s="${s//\\/\\\\}"
+# Control characters other than \n \r \t are rare in this output and are
+# dropped rather than emitted raw. (Bash strings cannot hold NUL.)
+CTRL=$'\001\002\003\004\005\006\007\010\013\014\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037'
+
+# jstr STRING: REPLY = STRING as a JSON string literal.
+jstr() {
+    local s="${1//\\/\\\\}"
     s="${s//\"/\\\"}"
     s="${s//$'\n'/\\n}"
     s="${s//$'\r'/\\r}"
     s="${s//$'\t'/\\t}"
-    s="$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013\014\016-\037')"
-    printf '"%s"' "$s"
-}
-
-json_val() {
-    if is_number "$1"; then printf '%s' "$1"; else json_str "$1"; fi
+    REPLY="\"${s//["$CTRL"]/}\""
 }
 
 # ── Result accumulation ──────────────────────────────────────────────────────
@@ -240,247 +216,359 @@ json_val() {
 CHECK_JSON=()
 OVERALL=0            # 0 ok, 1 warn, 2 crit
 WORST_STATUS="ok"
+LEVELS=(ok warn crit)
 
-status_rank() {
-    case "$1" in ok|info|skip) echo 0 ;; warn) echo 1 ;; crit) echo 2 ;; *) echo 0 ;; esac
+# paint STATUS: C and R = ANSI colour and reset for STATUS (empty without colour).
+paint() {
+    C=""; R=""
+    (( COLOR )) || return 0
+    R=$'\033[0m'
+    case "$1" in
+        ok) C=$'\033[32m' ;; warn) C=$'\033[33m' ;; crit) C=$'\033[31m' ;;
+        info) C=$'\033[36m' ;; skip) C=$'\033[90m' ;;
+    esac
 }
 
-# record NAME STATUS SUMMARY [key=value ...]
+# record NAME STATUS SUMMARY [metric ...]
+# A metric is key=NUMBER (split at the last "=", so keys such as mount points
+# may contain "=") or +key=STRING (always emitted as a JSON string).
 record() {
-    local name="$1" status="$2" summary="$3"; shift 3
-    local rank; rank="$(status_rank "$status")"
+    local name="$1" status="$2" summary="$3" rank=0 kv key metrics="" value; shift 3
+    case "$status" in warn) rank=1 ;; crit) rank=2 ;; esac
     if (( rank > OVERALL )); then OVERALL=$rank; WORST_STATUS="$status"; fi
 
-    local metrics="" first=1 kv key value
     for kv in "$@"; do
-        key="${kv%%=*}"; value="${kv#*=}"
-        (( first )) || metrics+=","
-        first=0
-        metrics+="$(json_str "$key"):$(json_val "$value")"
+        if [[ "$kv" == +* ]]; then
+            key="${kv%%=*}"; key="${key#+}"; jstr "${kv#*=}"; value="$REPLY"
+        else
+            key="${kv%=*}"; value="${kv##*=}"
+            if ! is_json_number "$value"; then jstr "$value"; value="$REPLY"; fi
+        fi
+        jstr "$key"
+        metrics+="${metrics:+,}$REPLY:$value"
     done
-    CHECK_JSON+=("{\"name\":$(json_str "$name"),\"status\":$(json_str "$status"),\"summary\":$(json_str "$summary"),\"metrics\":{${metrics}}}")
+    local entry
+    jstr "$name"; entry="{\"name\":$REPLY"
+    jstr "$status"; entry+=",\"status\":$REPLY"
+    jstr "$summary"; entry+=",\"summary\":$REPLY,\"metrics\":{${metrics}}}"
+    CHECK_JSON+=("$entry")
 
     if (( ! JSON )); then
-        if (( QUIET )) && [[ "$status" != "warn" && "$status" != "crit" ]]; then return; fi
-        local tag="$status" c_reset="" c=""
-        if (( COLOR )); then
-            c_reset=$'\033[0m'
-            case "$status" in
-                ok) c=$'\033[32m' ;; warn) c=$'\033[33m' ;; crit) c=$'\033[31m' ;;
-                info) c=$'\033[36m' ;; skip) c=$'\033[90m' ;;
-            esac
-        fi
-        printf '%s[%-4s]%s %-16s %s\n' "$c" "${tag^^}" "$c_reset" "$name" "$summary"
+        if (( QUIET )) && [[ "$status" != "warn" && "$status" != "crit" ]]; then return 0; fi
+        paint "$status"
+        printf '%s[%-4s]%s %-16s %s\n' "$C" "${status^^}" "$R" "$name" "$summary"
     fi
 }
 
-# Threshold helper: compare a value against warn/crit (higher is worse).
-# Prints ok|warn|crit.
-level_for() {
-    local value="$1" warn="$2" crit="$3"
-    awk -v v="$value" -v w="$warn" -v c="$crit" 'BEGIN {
-        if (v + 0 >= c + 0) print "crit"; else if (v + 0 >= w + 0) print "warn"; else print "ok" }'
+# dec_ge A B: true when decimal A >= decimal B, exactly, in integer arithmetic.
+# Inputs are validated decimals with at most 9 integer and 9 fractional digits.
+dec_ge() {
+    local a="${1#-}" b="${2#-}" sa=1 sb=1 af="" bf=""
+    [[ "$1" != -* ]] || sa=-1
+    [[ "$2" != -* ]] || sb=-1
+    [[ "$a" != *.* ]] || af="${a#*.}"
+    [[ "$b" != *.* ]] || bf="${b#*.}"
+    while (( ${#af} < ${#bf} )); do af+="0"; done
+    while (( ${#bf} < ${#af} )); do bf+="0"; done
+    (( sa * 10#${a%%.*}$af >= sb * 10#${b%%.*}$bf ))
+}
+
+# level VALUE WARN CRIT: LEVEL = ok|warn|crit (higher is worse), RANK = 0|1|2.
+level() {
+    RANK=0
+    if dec_ge "$1" "$3"; then RANK=2; elif dec_ge "$1" "$2"; then RANK=1; fi
+    LEVEL="${LEVELS[RANK]}"
+}
+
+# pct1 USED TOTAL: REPLY = USED/TOTAL as a percentage with one decimal, rounded half up.
+pct1() {
+    local t=$(( ($1 * 2000 / $2 + 1) / 2 ))
+    REPLY="$(( t / 10 )).$(( t % 10 ))"
 }
 
 has() { command -v "$1" >/dev/null 2>&1; }
 
+# Optional deadline prefix for probes that can block on a hung filesystem.
+# Probe output is captured as { var="$(cmd)"; } 2>/dev/null rather than with a
+# redirection inside the substitution, which lets bash exec cmd without an extra fork.
+DEADLINE=()
+if has timeout; then DEADLINE=(timeout -k 2 "$PROBE_TIMEOUT"); fi
+
+# The kernel exposes these directly; the commands are fallbacks for odd roots.
+HOST=""
+host_name() {
+    [[ -z "$HOST" ]] || return 0
+    { read -r HOST < "$PROC_ROOT/sys/kernel/hostname"; } 2>/dev/null || true
+    [[ -n "$HOST" ]] || { HOST="$(hostname)"; } 2>/dev/null || true
+    [[ -n "$HOST" ]] || HOST=unknown
+}
+
+now_utc() {
+    if (( BASH_VERSINFO[0] > 4 || BASH_VERSINFO[1] >= 2 )); then
+        TZ=UTC0 printf -v NOW '%(%Y-%m-%dT%H:%M:%SZ)T' -1
+    else
+        NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+}
+
 # ── Checks ───────────────────────────────────────────────────────────────────
 
 check_system() {
-    local host kernel uptime_s uptime_h
-    host="$(hostname 2>/dev/null || echo unknown)"
-    kernel="$(uname -r 2>/dev/null || echo unknown)"
-    if [[ -r "$PROC_ROOT/uptime" ]]; then
-        uptime_s="$(awk '{printf "%d", $1}' "$PROC_ROOT/uptime")"
+    local kernel="" up="" s d h m uptime_h
+    host_name
+    { read -r kernel < "$PROC_ROOT/sys/kernel/osrelease"; } 2>/dev/null || true
+    [[ -n "$kernel" ]] || { kernel="$(uname -r)"; } 2>/dev/null || true
+    [[ -n "$kernel" ]] || kernel=unknown
+    { read -r up _ < "$PROC_ROOT/uptime"; } 2>/dev/null || true
+    s="${up%%.*}"; is_int "$s" || s=0
+    d=$(( s / 86400 )); h=$(( s % 86400 / 3600 )); m=$(( s % 3600 / 60 ))
+    if (( d > 0 )); then uptime_h="${d}d ${h}h ${m}m"; elif (( h > 0 )); then uptime_h="${h}h ${m}m"; else uptime_h="${m}m"; fi
+    record system ok "$HOST, kernel $kernel, up $uptime_h" "+hostname=$HOST" "+kernel=$kernel" "uptime_seconds=$s"
+}
+
+# Online CPUs from sysfs ("0-3,6,8-11"). nproc is only a fallback: it reports the
+# caller's affinity mask and honours OMP_NUM_THREADS, neither of which bounds
+# the system-wide load average.
+cpu_count() {
+    local online="" r
+    CORES=0
+    { read -r online < "$FS_ROOT/sys/devices/system/cpu/online"; } 2>/dev/null || true
+    if [[ "$online" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+        local IFS=,
+        for r in $online; do CORES=$(( CORES + 10#${r#*-} - 10#${r%-*} + 1 )); done
     else
-        uptime_s=0
+        { CORES="$(OMP_NUM_THREADS='' OMP_THREAD_LIMIT='' nproc)"; } 2>/dev/null || true
     fi
-    uptime_h="$(awk -v s="$uptime_s" 'BEGIN { d=int(s/86400); h=int((s%86400)/3600); m=int((s%3600)/60);
-        if (d>0) printf "%dd %dh %dm", d, h, m; else if (h>0) printf "%dh %dm", h, m; else printf "%dm", m }')"
-    record system ok "$host, kernel $kernel, up $uptime_h" "hostname=$host" "kernel=$kernel" "uptime_seconds=$uptime_s"
+    is_int "$CORES" && (( CORES > 0 )) || CORES=1
 }
 
 check_load() {
-    [[ -r "$PROC_ROOT/loadavg" ]] || { record load skip "loadavg unavailable"; return; }
-    local l1 l5 l15 cores per_core level
-    read -r l1 l5 l15 _ < "$PROC_ROOT/loadavg"
-    cores="$(nproc 2>/dev/null || echo 1)"
-    is_int "$cores" && (( cores > 0 )) || cores=1
-    per_core="$(awk -v l="$l1" -v c="$cores" 'BEGIN { printf "%.2f", l / c }')"
-    level="$(level_for "$per_core" "$WARN_LOAD" "$CRIT_LOAD")"
-    record load "$level" "$l1 $l5 $l15 on $cores cores (${per_core}/core)" "load1=$l1" "load5=$l5" "load15=$l15" "cores=$cores" "load1_per_core=$per_core"
+    local l1="" l5="" l15="" frac v per_core
+    { read -r l1 l5 l15 _ < "$PROC_ROOT/loadavg"; } 2>/dev/null || true
+    [[ "$l1" =~ ^[0-9]{1,9}([.][0-9]+)?$ ]] || { record load skip "loadavg unavailable"; return 0; }
+    cpu_count
+    frac="${l1#*.}00"; [[ "$l1" == *.* ]] || frac=00
+    # load1 in hundredths, divided by cores and rounded half up to two decimals.
+    v=$(( ( (10#${l1%%.*} * 100 + 10#${frac:0:2}) * 2 / CORES + 1) / 2 ))
+    printf -v per_core '%d.%02d' $(( v / 100 )) $(( v % 100 ))
+    level "$per_core" "$WARN_LOAD" "$CRIT_LOAD"
+    record load "$LEVEL" "$l1 $l5 $l15 on $CORES cores (${per_core}/core)" "load1=$l1" "load5=$l5" "load15=$l15" "cores=$CORES" "load1_per_core=$per_core"
 }
 
-meminfo_kb() { awk -v k="$1" '$1 == k":" { print $2; exit }' "$PROC_ROOT/meminfo"; }
+# One pass over /proc/meminfo for both memory and swap.
+read_meminfo() {
+    [[ -z "${MEM_TOTAL+set}" ]] || return 0
+    MEM_TOTAL=""; MEM_AVAIL=""; SWAP_TOTAL=""; SWAP_FREE=""
+    local k v
+    while read -r k v _ || [[ -n "$k" ]]; do
+        case "$k" in
+            MemTotal:) MEM_TOTAL="$v" ;; MemAvailable:) MEM_AVAIL="$v" ;;
+            SwapTotal:) SWAP_TOTAL="$v" ;; SwapFree:) SWAP_FREE="$v" ;;
+        esac
+    done < "$PROC_ROOT/meminfo"
+}
+
+# used_check NAME TOTAL_KB LEFT_KB LEFT_KEY WARN CRIT: percentage of TOTAL in use.
+used_check() {
+    if ! { is_int "$2" && is_int "$3" && (( $2 > 0 && $3 <= $2 )); }; then record "$1" skip "meminfo incomplete"; return 0; fi
+    local used=$(( $2 - $3 ))
+    pct1 "$used" "$2"
+    level "$REPLY" "$5" "$6"
+    record "$1" "$LEVEL" "${REPLY}% used ($(( used / 1024 )) MiB of $(( $2 / 1024 )) MiB)" "used_percent=$REPLY" "total_kb=$2" "$4=$3"
+}
 
 check_memory() {
-    [[ -r "$PROC_ROOT/meminfo" ]] || { record memory skip "meminfo unavailable"; return; }
-    local total avail used pct level
-    total="$(meminfo_kb MemTotal)"; avail="$(meminfo_kb MemAvailable)"
-    [[ -n "$total" && -n "$avail" && "$total" != 0 ]] || { record memory skip "meminfo incomplete"; return; }
-    used=$(( total - avail ))
-    pct="$(awk -v u="$used" -v t="$total" 'BEGIN { printf "%.1f", u * 100 / t }')"
-    level="$(level_for "$pct" "$WARN_MEM" "$CRIT_MEM")"
-    record memory "$level" "${pct}% used ($(( used / 1024 )) MiB of $(( total / 1024 )) MiB)" "used_percent=$pct" "total_kb=$total" "available_kb=$avail"
+    [[ -r "$PROC_ROOT/meminfo" ]] || { record memory skip "meminfo unavailable"; return 0; }
+    read_meminfo
+    used_check memory "$MEM_TOTAL" "$MEM_AVAIL" available_kb "$WARN_MEM" "$CRIT_MEM"
 }
 
 check_swap() {
-    [[ -r "$PROC_ROOT/meminfo" ]] || { record swap skip "meminfo unavailable"; return; }
-    local total free used pct level
-    total="$(meminfo_kb SwapTotal)"; free="$(meminfo_kb SwapFree)"
-    if [[ -z "$total" || "$total" == 0 ]]; then record swap info "no swap configured" "total_kb=0"; return; fi
-    used=$(( total - free ))
-    pct="$(awk -v u="$used" -v t="$total" 'BEGIN { printf "%.1f", u * 100 / t }')"
-    level="$(level_for "$pct" "$WARN_SWAP" "$CRIT_SWAP")"
-    record swap "$level" "${pct}% used ($(( used / 1024 )) MiB of $(( total / 1024 )) MiB)" "used_percent=$pct" "total_kb=$total" "free_kb=$free"
+    [[ -r "$PROC_ROOT/meminfo" ]] || { record swap skip "meminfo unavailable"; return 0; }
+    read_meminfo
+    if [[ -z "$SWAP_TOTAL" || "$SWAP_TOTAL" == 0 ]]; then record swap info "no swap configured" "total_kb=0"; return 0; fi
+    used_check swap "$SWAP_TOTAL" "$SWAP_FREE" free_kb "$WARN_SWAP" "$CRIT_SWAP"
 }
 
-# df -P output lines for local filesystems (or the requested mount points).
-df_lines() {
-    local flag="$1"
-    if [[ -n "$MOUNTS" ]]; then
-        local m output line
-        while IFS= read -r m; do
-            if output="$(df -P "$flag" -- "$m" 2>/dev/null)"; then
-                line="$(awk 'NR == 2' <<< "$output")"
-                if [[ -n "$line" ]]; then printf '%s\n' "$line"; else printf '__NHC_MISSING_MOUNT__%s\n' "$m"; fi
-            else
-                printf '__NHC_MISSING_MOUNT__%s\n' "$m"
-            fi
-        done < <(split_list "$MOUNTS")
-    else
-        df -P "$flag" -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x fuse.portal 2>/dev/null | awk 'NR > 1'
-    fi
-}
-
+# check_fs_usage NAME DF_FLAG WARN CRIT UNIT: df -P for local filesystems (or --mounts).
 check_fs_usage() {
     local name="$1" flag="$2" warn="$3" crit="$4" unit="$5"
-    local worst="ok" summary="" count=0 metrics=() line mount pct level missing=""
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        if [[ "$line" == __NHC_MISSING_MOUNT__* ]]; then
-            missing+="${missing:+, }${line#__NHC_MISSING_MOUNT__}"
+    local worst=0 summary="" count=0 metrics=() lines=() line mount pct m out rc missing="" hung=""
+    if [[ -n "$MOUNTS" ]]; then
+        split_list "$MOUNTS"
+        for m in "${LIST[@]+"${LIST[@]}"}"; do
+            rc=0; { out="$("${DEADLINE[@]+"${DEADLINE[@]}"}" df -P "$flag" -- "$m")"; } 2>/dev/null || rc=$?
+            line="${out#*$'\n'}"; line="${line%%$'\n'*}"
+            if (( rc == 124 || rc == 137 )); then hung+="${hung:+, }$m"
+            elif (( rc != 0 )) || [[ "$out" != *$'\n'* || -z "$line" ]]; then missing+="${missing:+, }$m"
+            else lines+=("$line"); fi
+        done
+    else
+        rc=0
+        { out="$("${DEADLINE[@]+"${DEADLINE[@]}"}" df -P -l "$flag" -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs -x fuse.portal)"; } 2>/dev/null || rc=$?
+        if (( rc == 124 || rc == 137 )); then
+            record "$name" crit "df did not answer within ${PROBE_TIMEOUT}s" "timed_out=1"; return 0
+        fi
+        [[ "$out" != *$'\n'* ]] || mapfile -t lines <<< "${out#*$'\n'}"
+    fi
+    for line in "${lines[@]+"${lines[@]}"}"; do
+        # Filesystem, three counts, use%, then the mount point, which may contain spaces.
+        # A filesystem name with spaces falls back to a last-field mount point.
+        if [[ "$line" =~ ^[^[:space:]]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+([0-9]+)%[[:space:]]+(.+)$ ]] \
+            || [[ "$line" =~ [[:space:]]([0-9]+)%[[:space:]]+([^[:space:]]+)$ ]]; then
+            pct="${BASH_REMATCH[1]}"; mount="${BASH_REMATCH[2]}"
+        else
             continue
         fi
-        mount="$(awk '{print $NF}' <<< "$line")"
-        pct="$(awk '{print $(NF-1)}' <<< "$line")"; pct="${pct%\%}"
-        is_int "$pct" || continue
         count=$(( count + 1 ))
-        level="$(level_for "$pct" "$warn" "$crit")"
-        metrics+=("${mount}=${pct}")
-        if (( $(status_rank "$level") > $(status_rank "$worst") )); then worst="$level"; fi
-        if [[ "$level" != "ok" ]]; then summary+="${summary:+, }${mount} ${pct}%"; fi
-    done < <(df_lines "$flag")
-    if [[ -n "$missing" ]]; then
-        worst="crit"
-        summary+="${summary:+, }missing mount: $missing"
+        level "$pct" "$warn" "$crit"
+        metrics+=("${mount}=$(( 10#$pct ))")
+        (( RANK <= worst )) || worst=$RANK
+        [[ "$LEVEL" == ok ]] || summary+="${summary:+, }${mount} ${pct}%"
+    done
+    if [[ -n "$missing$hung" ]]; then
+        worst=2
+        [[ -z "$missing" ]] || summary+="${summary:+, }missing mount: $missing"
+        [[ -z "$hung" ]] || summary+="${summary:+, }no answer within ${PROBE_TIMEOUT}s: $hung"
+    elif (( count == 0 )); then
+        record "$name" skip "no filesystems found"; return 0
     fi
-    if (( count == 0 )) && [[ -z "$missing" ]]; then record "$name" skip "no filesystems found"; return; fi
-    if [[ -z "$summary" ]]; then summary="$count filesystem(s) under ${warn}% $unit"; fi
-    record "$name" "$worst" "$summary" "${metrics[@]}"
+    [[ -n "$summary" ]] || summary="$count filesystem(s) under ${warn}% $unit"
+    record "$name" "${LEVELS[worst]}" "$summary" "${metrics[@]+"${metrics[@]}"}"
 }
 
 check_disk() { check_fs_usage disk "-k" "$WARN_DISK" "$CRIT_DISK" "used"; }
 check_inodes() { check_fs_usage inodes "-i" "$WARN_INODES" "$CRIT_INODES" "inodes used"; }
 
 check_network() {
-    has ip || { record network skip "ip command unavailable"; return; }
-    local ifaces="" count=0 line name addr
-    while IFS= read -r line; do
-        name="$(awk '{print $NF}' <<< "$line")"; addr="$(awk '{print $2}' <<< "$line")"
-        [[ "$addr" == 127.* ]] && continue
+    has ip || { record network skip "ip command unavailable"; return 0; }
+    local out="" ifaces="" count=0 name addr
+    { out="$(ip -4 -o addr show)"; } 2>/dev/null || true
+    # "2: eth0    inet 203.0.113.5/24 brd ..."
+    while read -r _ name _ addr _; do
+        [[ -n "$addr" && "$addr" != 127.* ]] || continue
         count=$(( count + 1 ))
         ifaces+="${ifaces:+, }${name} ${addr}"
-    done < <(ip -4 -o addr show 2>/dev/null | awk '{print $2, $4, $2}')
+    done <<< "$out"
     if (( count == 0 )); then record network warn "no non-loopback IPv4 address" "interfaces=0"; else record network ok "$ifaces" "interfaces=$count"; fi
 }
 
 check_gateway() {
-    has ip || { record gateway skip "ip command unavailable"; return; }
-    local gw
-    gw="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
-    [[ -n "$gw" ]] || { record gateway warn "no default route" ; return; }
-    has ping || { record gateway skip "ping unavailable" "gateway=$gw"; return; }
-    if ping -c 1 -W "$PING_TIMEOUT" "$gw" >/dev/null 2>&1; then record gateway ok "$gw reachable" "gateway=$gw" "reachable=1"
-    else record gateway crit "$gw unreachable" "gateway=$gw" "reachable=0"; fi
+    has ip || { record gateway skip "ip command unavailable"; return 0; }
+    local out="" words=() w prev="" gw="" dev="" routes=0
+    { out="$(ip -4 route show default)"; } 2>/dev/null || true
+    read -r -d '' -a words <<< "$out" || true
+    # Only the first default route counts; multipath next hops follow it as "nexthop via ...".
+    for w in "${words[@]+"${words[@]}"}"; do
+        if [[ "$w" == default ]]; then routes=$(( routes + 1 )); (( routes == 1 )) || break; fi
+        case "$prev" in
+            via) [[ -n "$gw" ]] || gw="$w" ;;
+            dev) [[ -n "$dev" ]] || dev="$w" ;;
+        esac
+        prev="$w"
+    done
+    (( routes > 0 )) || { record gateway warn "no default route"; return 0; }
+    if [[ -z "$gw" ]]; then
+        # Point-to-point default route (WireGuard, PPP): there is no next hop to ping.
+        record gateway info "default route on ${dev:-unknown device} (no next hop)" "+interface=${dev:-unknown}"; return 0
+    fi
+    has ping || { record gateway skip "ping unavailable" "+gateway=$gw"; return 0; }
+    if ping -c 1 -W "$PING_TIMEOUT" "$gw" >/dev/null 2>&1; then record gateway ok "$gw reachable" "+gateway=$gw" "reachable=1"
+    else record gateway crit "$gw unreachable" "+gateway=$gw" "reachable=0"; fi
 }
 
 check_dns() {
-    [[ -n "$DNS_NAME" ]] || { record dns skip "no --dns name configured"; return; }
-    has getent || { record dns crit "getent unavailable for configured DNS target"; return; }
-    local resolved
-    resolved="$(getent ahosts "$DNS_NAME" 2>/dev/null | awk 'NR == 1 {print $1}')"
-    if [[ -n "$resolved" ]]; then record dns ok "$DNS_NAME -> $resolved" "name=$DNS_NAME" "address=$resolved"
-    else record dns crit "$DNS_NAME does not resolve" "name=$DNS_NAME"; fi
+    [[ -n "$DNS" ]] || { record dns skip "no --dns name configured"; return 0; }
+    has getent || { record dns crit "getent unavailable for configured DNS target"; return 0; }
+    local resolved=""
+    { resolved="$(getent ahosts "$DNS")"; } 2>/dev/null || true
+    resolved="${resolved%%[[:space:]]*}"
+    if [[ -n "$resolved" ]]; then record dns ok "$DNS -> $resolved" "+name=$DNS" "+address=$resolved"
+    else record dns crit "$DNS does not resolve" "+name=$DNS"; fi
 }
 
+# check_units NAME LIST [systemctl scope args]: one systemctl call for all units.
 check_units() {
-    local name="$1" list="$2"
-    local -a scope=()
-    [[ -n "$3" ]] && scope=("$3")
-    [[ -n "$list" ]] || { record "$name" skip "none configured"; return; }
-    has systemctl || { record "$name" crit "systemctl unavailable for configured units"; return; }
-    local unit down="" up=0 total=0 metrics=()
-    while IFS= read -r unit; do
-        total=$(( total + 1 ))
-        if systemctl "${scope[@]+"${scope[@]}"}" is-active --quiet -- "$unit" 2>/dev/null; then up=$(( up + 1 )); metrics+=("${unit}=1")
-        else down+="${down:+, }${unit}"; metrics+=("${unit}=0"); fi
-    done < <(split_list "$list")
-    if [[ -z "$down" ]]; then record "$name" ok "$up/$total active" "${metrics[@]}"
-    else record "$name" crit "inactive: $down ($up/$total active)" "${metrics[@]}"; fi
-}
-
-check_services() { check_units services "$SERVICES" ""; }
-check_user_services() { check_units user_services "$USER_SERVICES" "--user"; }
-
-listening_ports() {
-    if has ss; then ss -Hltn 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -u
-    elif has netstat; then netstat -ltn 2>/dev/null | awk 'NR > 2 {print $4}' | sed 's/.*://' | sort -u
+    local name="$1" list="$2"; shift 2
+    split_list "$list"
+    (( ${#LIST[@]} )) || { record "$name" skip "none configured"; return 0; }
+    has systemctl || { record "$name" crit "systemctl unavailable for configured units"; return 0; }
+    local units=("${LIST[@]}") states=() out="" i down="" up=0 metrics=()
+    { out="$(systemctl "$@" is-active -- "${units[@]}")"; } 2>/dev/null || true
+    [[ -z "$out" ]] || mapfile -t states <<< "$out"
+    if (( ${#states[@]} != ${#units[@]} )); then
+        # systemctl printed no per-unit answer (for example an invalid unit name): ask one at a time.
+        states=()
+        for i in "${units[@]}"; do
+            if systemctl "$@" is-active --quiet -- "$i" 2>/dev/null; then states+=(active); else states+=(inactive); fi
+        done
     fi
+    for i in "${!units[@]}"; do
+        case "${states[i]}" in
+            active|reloading|refreshing) up=$(( up + 1 )); metrics+=("${units[i]}=1") ;;
+            *) down+="${down:+, }${units[i]}"; metrics+=("${units[i]}=0") ;;
+        esac
+    done
+    if [[ -z "$down" ]]; then record "$name" ok "$up/${#units[@]} active" "${metrics[@]}"
+    else record "$name" crit "inactive: $down ($up/${#units[@]} active)" "${metrics[@]}"; fi
 }
+
+check_services() { check_units services "$SERVICES"; }
+check_user_services() { check_units user_services "$USER_SERVICES" --user; }
 
 check_ports() {
-    [[ -n "$PORTS" ]] || { record ports skip "none configured"; return; }
-    if ! has ss && ! has netstat; then record ports crit "ss and netstat unavailable for configured ports"; return; fi
-    local open port missing="" up=0 total=0 metrics=()
-    open="$(listening_ports)"
-    while IFS= read -r port; do
-        is_int "$port" || die "invalid port: $port"
-        total=$(( total + 1 ))
-        if grep -qx "$port" <<< "$open"; then up=$(( up + 1 )); metrics+=("${port}=1")
+    split_list "$PORTS"
+    (( ${#LIST[@]} )) || { record ports skip "none configured"; return 0; }
+    local port open=" " out="" st addr missing="" up=0 total=0 metrics=()
+    # No -H, which older iproute2 lacks; header lines are skipped by their first word.
+    if has ss; then { out="$(ss -ltn)"; } 2>/dev/null || true
+    elif has netstat; then { out="$(netstat -ltn)"; } 2>/dev/null || true
+    else record ports crit "ss and netstat unavailable for configured ports"; return 0; fi
+    while read -r st _ _ addr _; do
+        case "$st" in State|Netid|Active|Proto|"") continue ;; esac
+        open+="${addr##*:} "
+    done <<< "$out"
+    for port in "${LIST[@]}"; do
+        if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || (( 10#$port > 65535 )); then die "invalid port: $port"; fi
+        port=$(( 10#$port )); total=$(( total + 1 ))
+        if [[ "$open" == *" $port "* ]]; then up=$(( up + 1 )); metrics+=("${port}=1")
         else missing+="${missing:+, }${port}"; metrics+=("${port}=0"); fi
-    done < <(split_list "$PORTS")
+    done
     if [[ -z "$missing" ]]; then record ports ok "$up/$total listening" "${metrics[@]}"
     else record ports crit "not listening: $missing ($up/$total)" "${metrics[@]}"; fi
 }
 
 check_peers() {
-    [[ -n "$PEERS" ]] || { record peers skip "none configured"; return; }
-    has ping || { record peers crit "ping unavailable for configured peers"; return; }
-    local peer down="" up=0 total=0 metrics=()
-    while IFS= read -r peer; do
-        total=$(( total + 1 ))
-        if ping -c 1 -W "$PING_TIMEOUT" -- "$peer" >/dev/null 2>&1; then up=$(( up + 1 )); metrics+=("${peer}=1")
-        else down+="${down:+, }${peer}"; metrics+=("${peer}=0"); fi
-    done < <(split_list "$PEERS")
-    if [[ -z "$down" ]]; then record peers ok "$up/$total reachable" "${metrics[@]}"
-    else record peers crit "unreachable: $down ($up/$total)" "${metrics[@]}"; fi
+    split_list "$PEERS"
+    (( ${#LIST[@]} )) || { record peers skip "none configured"; return 0; }
+    has ping || { record peers crit "ping unavailable for configured peers"; return 0; }
+    local peers=("${LIST[@]}") pids=() i down="" up=0 metrics=()
+    # Ping every peer at once: a run costs one ping timeout, not one per peer.
+    for i in "${peers[@]}"; do ping -c 1 -W "$PING_TIMEOUT" -- "$i" >/dev/null 2>&1 & pids+=("$!"); done
+    for i in "${!peers[@]}"; do
+        if wait "${pids[i]}"; then up=$(( up + 1 )); metrics+=("${peers[i]}=1")
+        else down+="${down:+, }${peers[i]}"; metrics+=("${peers[i]}=0"); fi
+    done
+    if [[ -z "$down" ]]; then record peers ok "$up/${#peers[@]} reachable" "${metrics[@]}"
+    else record peers crit "unreachable: $down ($up/${#peers[@]})" "${metrics[@]}"; fi
 }
 
 check_failed_units() {
-    has systemctl || { record failed_units skip "systemctl unavailable"; return; }
-    local failed count
-    failed="$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -v '^$' || true)"
-    count="$(grep -c . <<< "$failed" || true)"
-    [[ -z "$failed" ]] && count=0
+    has systemctl || { record failed_units skip "systemctl unavailable"; return 0; }
+    local out="" unit failed="" count=0
+    { out="$(systemctl list-units --state=failed --no-legend --plain)"; } 2>/dev/null || true
+    while read -r unit _; do
+        [[ -n "$unit" ]] || continue
+        count=$(( count + 1 )); failed+="${failed:+ }$unit"
+    done <<< "$out"
     if (( count == 0 )); then record failed_units ok "no failed units" "count=0"
-    else record failed_units warn "$count failed: $(tr '\n' ' ' <<< "$failed" | sed 's/ $//')" "count=$count"; fi
+    else record failed_units warn "$count failed: $failed" "count=$count"; fi
 }
 
 check_time_sync() {
-    has timedatectl || { record time_sync skip "timedatectl unavailable"; return; }
-    local synced
-    synced="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+    has timedatectl || { record time_sync skip "timedatectl unavailable"; return 0; }
+    local synced=""
+    { synced="$(timedatectl show -p NTPSynchronized --value)"; } 2>/dev/null || true
     case "$synced" in
         yes) record time_sync ok "clock synchronized" "synchronized=1" ;;
         no) record time_sync warn "clock not synchronized" "synchronized=0" ;;
@@ -489,173 +577,171 @@ check_time_sync() {
 }
 
 check_reboot_required() {
-    if [[ -e "$FS_ROOT/var/run/reboot-required" || -e "$FS_ROOT/run/reboot-required" ]]; then
-        local pkgs=""
-        [[ -r "$FS_ROOT/var/run/reboot-required.pkgs" ]] && pkgs="$(tr '\n' ' ' < "$FS_ROOT/var/run/reboot-required.pkgs" | sed 's/ $//')"
-        record reboot_required warn "reboot required${pkgs:+ ($pkgs)}" "required=1"
-    else
-        record reboot_required ok "no reboot pending" "required=0"
-    fi
+    local dir pkg pkgs=""
+    for dir in "$FS_ROOT/var/run" "$FS_ROOT/run"; do
+        [[ -e "$dir/reboot-required" ]] || continue
+        if [[ -r "$dir/reboot-required.pkgs" ]]; then
+            while read -r pkg || [[ -n "$pkg" ]]; do
+                [[ -z "$pkg" ]] || pkgs+="${pkgs:+ }$pkg"
+            done < "$dir/reboot-required.pkgs"
+        fi
+        record reboot_required warn "reboot required${pkgs:+ ($pkgs)}" "required=1"; return 0
+    done
+    record reboot_required ok "no reboot pending" "required=0"
+}
+
+# Count the lines of a string without spawning wc or grep.
+line_count() {
+    if [[ -z "$1" ]]; then REPLY=0; else local nl="${1//[!$'\n']/}"; REPLY=$(( ${#nl} + 1 )); fi
 }
 
 check_sessions() {
-    has who || { record sessions skip "who unavailable"; return; }
-    local count
-    count="$(who 2>/dev/null | grep -c . || true)"
-    record sessions info "$count login session(s)" "count=$count"
+    has who || { record sessions skip "who unavailable"; return 0; }
+    local out=""
+    { out="$(who)"; } 2>/dev/null || true
+    line_count "$out"
+    record sessions info "$REPLY login session(s)" "count=$REPLY"
 }
 
 check_zombies() {
-    [[ -d "$PROC_ROOT" ]] || { record zombies skip "proc unavailable"; return; }
-    local count level
-    count="$(grep -sh '^State:' "$PROC_ROOT"/[0-9]*/status 2>/dev/null | grep -c 'Z' || true)"
-    level="$(level_for "$count" "$WARN_ZOMBIES" "$CRIT_ZOMBIES")"
-    record zombies "$level" "$count zombie process(es)" "count=$count"
+    [[ -d "$PROC_ROOT" ]] || { record zombies skip "proc unavailable"; return 0; }
+    local out="" rc=0
+    # One grep over every status file; it exits 2 when a process vanishes mid-scan, which is harmless.
+    if has grep; then out="$(grep -sh '^State:[[:space:]]*Z' "$PROC_ROOT"/[0-9]*/status)" || rc=$?; else rc=127; fi
+    # Not runnable at all (no grep, or an argument list too long for exec).
+    (( rc <= 2 )) || { record zombies skip "process table unreadable"; return 0; }
+    line_count "$out"; local count=$REPLY
+    level "$count" "$WARN_ZOMBIES" "$CRIT_ZOMBIES"
+    record zombies "$LEVEL" "$count zombie process(es)" "count=$count"
 }
 
 # ── Local run ────────────────────────────────────────────────────────────────
 
-emit_local_json() {
-    local ts host joined="" first=1 item
-    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    host="$(hostname 2>/dev/null || echo unknown)"
-    for item in "${CHECK_JSON[@]+"${CHECK_JSON[@]}"}"; do
-        (( first )) || joined+=","
-        first=0
-        joined+="$item"
-    done
-    # The "node-healthcheck" version key predates the rename and is kept for
-    # existing consumers and mixed-version fleets.
-    printf '{"node-healthcheck":%s,"host":%s,"timestamp":%s,"status":%s,"exit_code":%d,"checks":[%s]}\n' \
-        "$(json_str "$NHC_VERSION")" "$(json_str "$host")" "$(json_str "$ts")" "$(json_str "$WORST_STATUS")" "$OVERALL" "$joined"
-}
-
 run_local() {
     local c
+    host_name
     if (( ! JSON )); then
-        printf 'firepot %s - %s - %s\n\n' "$NHC_VERSION" "$(hostname 2>/dev/null || echo unknown)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        now_utc
+        printf 'firepot %s - %s - %s\n\n' "$NHC_VERSION" "$HOST" "$NOW"
     fi
     for c in "${SELECTED[@]+"${SELECTED[@]}"}"; do "check_$c"; done
     if (( JSON )); then
-        emit_local_json
+        local joined="" item
+        for item in "${CHECK_JSON[@]+"${CHECK_JSON[@]}"}"; do joined+="${joined:+,}$item"; done
+        now_utc; jstr "$HOST"
+        # The "node-healthcheck" version key predates the rename and is kept for
+        # existing consumers and mixed-version fleets.
+        printf '{"node-healthcheck":"%s","host":%s,"timestamp":"%s","status":"%s","exit_code":%d,"checks":[%s]}\n' \
+            "$NHC_VERSION" "$REPLY" "$NOW" "$WORST_STATUS" "$OVERALL" "$joined"
     else
-        local c_reset="" c=""
-        if (( COLOR )); then c_reset=$'\033[0m'; case "$WORST_STATUS" in ok) c=$'\033[32m' ;; warn) c=$'\033[33m' ;; crit) c=$'\033[31m' ;; esac; fi
-        printf '\nOverall: %s%s%s (exit %d)\n' "$c" "${WORST_STATUS^^}" "$c_reset" "$OVERALL"
+        paint "$WORST_STATUS"
+        printf '\nOverall: %s%s%s (exit %d)\n' "$C" "${WORST_STATUS^^}" "$R" "$OVERALL"
     fi
-    exit "$OVERALL"
+    finish "$OVERALL"
 }
 
 # ── Multi-node run ───────────────────────────────────────────────────────────
 
+# REMOTE_ARGS: the effective settings (flags and config file alike) as flags, plus --json.
 remote_args() {
-    # Forward everything except host selection and output mode; force --json.
-    local args=() skip_next=0 a
-    for a in "${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}"; do
-        if (( skip_next )); then skip_next=0; continue; fi
-        case "$a" in
-            --host|--ssh-opts|--ssh-timeout|--config) skip_next=1 ;;
-            --json|--quiet|--no-color) ;;
-            *) args+=("$a") ;;
-        esac
+    local args=() key var
+    for key in $KEYS; do
+        var="${key^^}"
+        case "$key" in hosts|ssh_*) continue ;; checks) key=check ;; esac
+        [[ -z "${!var}" ]] || args+=("--${key//_/-}" "${!var}")
     done
-    # A config file is local; re-express its target lists explicitly for the remote.
-    if [[ -n "$CONFIG_FILE" ]]; then
-        [[ -n "$SERVICES" ]] && args+=(--services "$SERVICES")
-        [[ -n "$USER_SERVICES" ]] && args+=(--user-services "$USER_SERVICES")
-        [[ -n "$PORTS" ]] && args+=(--ports "$PORTS")
-        [[ -n "$PEERS" ]] && args+=(--peers "$PEERS")
-        [[ -n "$DNS_NAME" ]] && args+=(--dns "$DNS_NAME")
-        [[ -n "$MOUNTS" ]] && args+=(--mounts "$MOUNTS")
-        [[ -n "$CHECKS" ]] && args+=(--check "$CHECKS")
-        [[ -n "$SKIP" ]] && args+=(--skip "$SKIP")
-        args+=(--warn-load "$WARN_LOAD" --crit-load "$CRIT_LOAD" --warn-mem "$WARN_MEM" --crit-mem "$CRIT_MEM"
-               --warn-swap "$WARN_SWAP" --crit-swap "$CRIT_SWAP" --warn-disk "$WARN_DISK" --crit-disk "$CRIT_DISK"
-               --warn-inodes "$WARN_INODES" --crit-inodes "$CRIT_INODES" --warn-zombies "$WARN_ZOMBIES" --crit-zombies "$CRIT_ZOMBIES"
-               --ping-timeout "$PING_TIMEOUT")
-    fi
-    args+=(--json)
-    printf '%q ' "${args[@]}"
+    printf -v REMOTE_ARGS '%q ' "${args[@]}" --json
 }
 
-validate_remote_json() {
-    python3 -c '
+# Reads one remote report from stdin, bounded to 1 MiB. Exit 0 prints the
+# report's exit code, the report as compact JSON, then (text mode) one line
+# per warn/crit check; exit 1 means no output at all, exit 2 an invalid report.
+VALIDATOR='
 import json, sys
-raw = sys.stdin.buffer.read(1024 * 1024 + 1)
-if len(raw) > 1024 * 1024:
-    raise SystemExit(1)
+raw = sys.stdin.buffer.read(1048577)
+if not raw.strip():
+    sys.exit(1)
+def reject(_):
+    raise ValueError
 try:
-    data = json.loads(raw, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+    if len(raw) > 1048576:
+        raise ValueError
+    d = json.loads(raw, parse_constant=reject)
+    ok = (isinstance(d, dict)
+          and d.get("node-healthcheck", d.get("firepot")) == sys.argv[1]
+          and isinstance(d.get("host"), str)
+          and d.get("status") in ("ok", "warn", "crit")
+          and type(d.get("exit_code")) is int
+          and d["exit_code"] == ("ok", "warn", "crit").index(d["status"])
+          and isinstance(d.get("checks"), list)
+          and all(isinstance(c, dict)
+                  and isinstance(c.get("name"), str)
+                  and c.get("status") in ("ok", "warn", "crit", "info", "skip")
+                  and isinstance(c.get("summary"), str)
+                  for c in d["checks"]))
 except (UnicodeError, ValueError):
-    raise SystemExit(1)
-expected_exit = int(sys.argv[1])
-if not (isinstance(data, dict)
-        and data.get("node-healthcheck", data.get("firepot")) == sys.argv[2]
-        and isinstance(data.get("host"), str)
-        and data.get("status") == ("ok", "warn", "crit")[expected_exit]
-        and type(data.get("exit_code")) is int
-        and data["exit_code"] == expected_exit
-        and isinstance(data.get("checks"), list)
-        and all(isinstance(check, dict)
-                and isinstance(check.get("name"), str)
-                and check.get("status") in ("ok", "warn", "crit", "skip")
-                and isinstance(check.get("summary"), str)
-                for check in data["checks"])):
-    raise SystemExit(1)
-print(json.dumps(data, separators=(",", ":"), ensure_ascii=False))
-' "$1" "$NHC_VERSION"
-}
+    ok = False
+if not ok:
+    sys.exit(2)
+print(d["exit_code"])
+print(json.dumps(d, separators=(",", ":"), ensure_ascii=False))
+if sys.argv[2] == "0":
+    clean = lambda s: "".join(ch if ch.isprintable() else "?" for ch in s)
+    for c in d["checks"]:
+        if c["status"] in ("warn", "crit"):
+            print("    [%s] %s: %s" % (c["status"], clean(c["name"]), clean(c["summary"])))
+'
 
 run_remote() {
     has ssh || die "ssh is required for --host"
     has python3 || die "python3 is required on the originating host for --host report validation"
-    local host output raw rc nodes="" first=1 node_status node_exit worst=0 worst_status="ok" args remote_error
-    args="$(remote_args)"
-    # shellcheck disable=SC2086
-    while IFS= read -r host; do
-        set +e
-        raw="$(ssh -o BatchMode=yes -o ConnectTimeout="$SSH_TIMEOUT" $SSH_OPTS -- "$host" "bash -s -- $args" < "${BASH_SOURCE[0]}" 2>/dev/null)"
-        rc=$?
-        set -e
-        output=""
-        if (( rc == 0 || rc == 1 || rc == 2 )); then
-            output="$(validate_remote_json "$rc" <<< "$raw")" || output=""
-        fi
-        if [[ -n "$output" ]]; then
-            node_exit=$rc
-            case "$rc" in 0) node_status=ok ;; 1) node_status=warn ;; *) node_status=crit ;; esac
-            (( first )) || nodes+=","
-            first=0
-            nodes+="$output"
+    local script="${BASH_SOURCE[0]:-}"
+    [[ -f "$script" && -r "$script" ]] || die "--host needs firepot to run from a readable file"
+    local host result body rc src vrc nodes="" node_status worst=0 worst_status="ok" error ssh_opts=() details
+    read -r -a ssh_opts <<< "$SSH_OPTS"
+    remote_args
+    split_list "$HOSTS"
+    for host in "${LIST[@]+"${LIST[@]}"}"; do
+        # The report streams straight into the bounded validator, so a runaway
+        # remote cannot fill memory here. ServerAlive* ends dead connections;
+        # ssh keeps the first value given, so --ssh-opts can override those two.
+        result="$(ssh -o BatchMode=yes -o ConnectTimeout="$SSH_TIMEOUT" "${ssh_opts[@]+"${ssh_opts[@]}"}" \
+                      -o ServerAliveInterval="$SSH_TIMEOUT" -o ServerAliveCountMax=3 \
+                      -- "$host" "bash -s -- $REMOTE_ARGS" < "$script" 2>/dev/null \
+                  | python3 -c "$VALIDATOR" "$NHC_VERSION" "$JSON"; printf '\n%s %s' "${PIPESTATUS[@]}")"
+        read -r src vrc <<< "${result##*$'\n'}"
+        body="${result%$'\n'*}"
+        details=""
+        if [[ "$vrc" == 0 && "$src" == [012] && "${body%%$'\n'*}" == "$src" ]]; then
+            rc=$src; node_status="${LEVELS[rc]}"
+            body="${body#*$'\n'}"; body="${body%$'\n'}"
+            nodes+="${nodes:+,}${body%%$'\n'*}"
+            [[ "$body" != *$'\n'* ]] || details="${body#*$'\n'}"
         else
-            node_exit=2; node_status=crit
-            remote_error="invalid remote report (exit $rc)"
-            if (( rc > 2 )); then remote_error="ssh failed with exit $rc"; fi
-            (( first )) || nodes+=","
-            first=0
-            nodes+="{\"node-healthcheck\":$(json_str "$NHC_VERSION"),\"host\":$(json_str "$host"),\"status\":\"crit\",\"exit_code\":2,\"error\":$(json_str "$remote_error"),\"checks\":[]}"
+            rc=2; node_status=crit
+            if [[ "$src" == 255 ]]; then error="ssh failed with exit 255"
+            elif [[ "$vrc" == 2 || "$src" == [012] ]]; then error="invalid remote report (exit $src)"
+            else error="remote run failed with exit $src"; fi
+            jstr "$host"; nodes+="${nodes:+,}{\"node-healthcheck\":\"$NHC_VERSION\",\"host\":$REPLY"
+            nodes+=",\"status\":\"crit\",\"exit_code\":2,\"error\":\"$error\",\"checks\":[]}"
+            details="    $error"
         fi
-        if (( node_exit > worst )); then worst=$node_exit; worst_status=$node_status; fi
+        if (( rc > worst )); then worst=$rc; worst_status=$node_status; fi
         if (( ! JSON )); then
-            local c_reset="" c=""
-            if (( COLOR )); then c_reset=$'\033[0m'; case "$node_status" in ok) c=$'\033[32m' ;; warn) c=$'\033[33m' ;; crit) c=$'\033[31m' ;; esac; fi
-            printf '%s[%-4s]%s %s\n' "$c" "${node_status^^}" "$c_reset" "$host"
-            if [[ "$node_status" != "ok" && "$output" == \{* ]]; then
-                # Surface the failing checks without a JSON parser: one summary per non-ok check.
-                grep -o '{"name":"[^"]*","status":"\(warn\|crit\)","summary":"[^"]*"' <<< "$output" \
-                    | sed -E 's/\{"name":"([^"]*)","status":"([^"]*)","summary":"([^"]*)"/    [\2] \1: \3/' || true
-            elif [[ "$node_status" != "ok" ]]; then
-                printf '    %s\n' "$remote_error"
-            fi
+            paint "$node_status"
+            printf '%s[%-4s]%s %s\n' "$C" "${node_status^^}" "$R" "$host"
+            [[ "$node_status" == ok || -z "$details" ]] || printf '%s\n' "$details"
         fi
-    done < <(split_list "$HOSTS")
+    done
     if (( JSON )); then
-        printf '{"node-healthcheck":%s,"timestamp":%s,"status":%s,"exit_code":%d,"nodes":[%s]}\n' \
-            "$(json_str "$NHC_VERSION")" "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "$worst_status")" "$worst" "$nodes"
+        now_utc
+        printf '{"node-healthcheck":"%s","timestamp":"%s","status":"%s","exit_code":%d,"nodes":[%s]}\n' \
+            "$NHC_VERSION" "$NOW" "$worst_status" "$worst" "$nodes"
     else
-        printf '\nOverall: %s (exit %d)\n' "${worst_status^^}" "$worst"
+        paint "$worst_status"
+        printf '\nOverall: %s%s%s (exit %d)\n' "$C" "${worst_status^^}" "$R" "$worst"
     fi
-    exit "$worst"
+    finish "$worst"
 }
 
 if [[ -n "$HOSTS" ]]; then run_remote; else run_local; fi
