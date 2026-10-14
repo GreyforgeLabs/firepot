@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-10-14
+
+### Fixed
+
+- Fleet mode accepts remote reports that contain `info` checks. `sessions` is always `info` and `swap` is `info` without swap, so a `--host` run with the default check set now aggregates every node instead of marking each one as an invalid report.
+- A remote that runs but exits with a code other than 0, 1, or 2 is reported as `remote run failed with exit N`; `ssh failed` is kept for ssh's own exit 255.
+- Text-mode fleet output prints each failing check's summary decoded from JSON, so quotes and backslashes come through intact.
+- Remote reports stream straight into the 1 MiB-bounded validator rather than being buffered in a shell variable first. `ServerAliveInterval` (the `--ssh-timeout` value) with three retries ends dead connections.
+- `df` runs under a deadline (10 seconds, `FIREPOT_PROBE_TIMEOUT`), so a hung mount becomes a critical result instead of stalling the run. The default filesystem list uses `df -l`, matching the documented local-filesystem scope.
+- Lists given to `--services`, `--peers`, `--mounts`, and the other list options are never glob-expanded against the working directory, and empty items are dropped.
+- Load per core divides by online CPUs from `/sys/devices/system/cpu/online`. `nproc` (the fallback) follows the caller's CPU affinity and `OMP_NUM_THREADS`, which do not bound the system-wide load average.
+- The gateway check follows the first default route: multipath next hops are pinged correctly, and a point-to-point default route (WireGuard, PPP), which has no next hop to ping, is reported as `info`.
+- Mount points containing spaces or `=` keep their full names in the disk and inode metrics.
+- String metrics (`hostname`, `kernel`, `name`, `address`, `gateway`) are always JSON strings, so every hostname, including all-digit names such as `007`, yields valid JSON.
+- Port lists accept leading zeros (`022` matches port 22), reject numbers above 65535 as usage errors, and work with `ss` builds that lack `-H`.
+- An empty `/proc/loadavg` or an incomplete `/proc/meminfo` is reported as a skipped check. Any unexpected runtime failure exits 3, as documented, rather than with a status that reads as a health state.
+- Arguments after `--` are rejected as usage errors instead of being ignored.
+
+### Changed
+
+- A full local check starts 12 processes instead of 559 and finishes in about a tenth of the time (median 76 ms instead of 886 ms on the reference host). JSON escaping, thresholds, and percentages are computed in bash; the hostname, kernel release, CPU count, uptime, and memory figures are read from `/proc` and `/sys`; and each probe's output is parsed without awk, sed, sort, or tr.
+- Configured peers are pinged in parallel, so unreachable peers cost one ping timeout in total rather than one each.
+- Configured systemd units are checked with one `systemctl is-active` call, falling back to one call per unit if systemctl cannot answer for the whole list.
+- The script runs with `LC_ALL=C`, so probe output parses the same way in every locale.
+- Long options and config keys share one table, and fleet mode forwards the effective settings, whether they came from flags or `--config`.
+- awk is no longer required.
+- The deprecated `node-healthcheck` name keeps working; its stderr note now says it will be removed in a future release.
+
 ## [1.2.0] - 2026-10-05
 
 ### Changed

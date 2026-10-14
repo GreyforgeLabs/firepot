@@ -32,8 +32,8 @@ firepot/
 
 ## Setup Prerequisites
 
-- bash 4.0 or newer, coreutils, awk (any Linux distribution)
-- Optional per check: `ip`, `ss` or `netstat`, `systemctl`, `ping`, `getent`, `timedatectl`, `who`
+- bash 4.0 or newer (any Linux distribution); no awk, sed, or jq needed
+- Optional per check: `df`, `ip`, `ss` or `netstat`, `systemctl`, `ping`, `getent`, `timedatectl`, `who`, `grep`; `timeout` bounds `df`
 - Tests only: python3
 - No root required
 
@@ -49,21 +49,21 @@ firepot/
 
 ```bash
 bin/firepot --version
-# Expected output: firepot 1.2.0
+# Expected output: firepot 1.2.1
 bash tests/run.sh
 # Expected output: firepot tests: N passed, 0 failed
 ```
 
 ## Key Entry Points
 
-- `bin/firepot` - all logic. Checks are functions named `check_<name>` and are dispatched from the `ALL_CHECKS` list. `record NAME STATUS SUMMARY key=value...` is the single output path for text and JSON.
+- `bin/firepot` - all logic. Checks are functions named `check_<name>` and are dispatched from the `ALL_CHECKS` list. `record NAME STATUS SUMMARY key=NUMBER... +key=STRING...` is the single output path for text and JSON. Helpers return values in globals (`REPLY`, `LEVEL`, `LIST`) instead of through `$(...)`, so a run forks only for the probe commands themselves. Long options and config keys share the `KEYS` table.
 - `tests/run.sh` - fixture builder (`healthy_proc`, `shim`) and assertions (`assert_eq`, `jget`).
 
 ## Configuration
 
 - Flags: see `bin/firepot --help`
 - Config file: `--config FILE`, format in `examples/firepot.conf`
-- Test hooks: `FIREPOT_PROC` (alternate `/proc` root) and `FIREPOT_ROOT` (alternate filesystem root for `/var/run/reboot-required`); the pre-rename `NODE_HEALTHCHECK_PROC` and `NODE_HEALTHCHECK_ROOT` are read as fallbacks
+- Test hooks: `FIREPOT_PROC` (alternate `/proc` root) and `FIREPOT_ROOT` (alternate filesystem root for `/var/run/reboot-required` and `/sys/devices/system/cpu/online`); the pre-rename `NODE_HEALTHCHECK_PROC` and `NODE_HEALTHCHECK_ROOT` are read as fallbacks. `FIREPOT_PROBE_TIMEOUT` (default 10 seconds) is the `df` deadline
 - Compatibility: the JSON version key stays `"node-healthcheck"`; invoking the script as `node-healthcheck` prints a one-line stderr deprecation note (never on fleet remotes)
 
 ## Common Tasks

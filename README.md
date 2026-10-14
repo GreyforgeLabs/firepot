@@ -18,7 +18,7 @@
 
 Every homelab and small fleet ends up with the same script: a few `df` and `free` calls, a loop over services, a ping to the gateway. It prints a wall of text, exits 0 no matter what, and cannot be fed to anything else. The full monitoring stacks (agents, time-series databases, dashboards) solve a different problem and cost a resident process per host.
 
-`firepot` is the script you would eventually write, finished. Local checks use bash, coreutils, awk, and the standard command for each probe. It reports every check with a status and numeric metrics, emits JSON when asked, returns an exit code a cron job or CI step can act on, and can stream itself to other hosts over SSH and aggregate their answers.
+`firepot` is the script you would eventually write, finished. Local checks use bash and the standard command for each probe, and read `/proc` directly wherever the kernel already has the answer: a full local run starts about a dozen processes. It reports every check with a status and numeric metrics, emits JSON when asked, returns an exit code a cron job or CI step can act on, and can stream itself to other hosts over SSH and aggregate their answers.
 
 ## Quick Start
 
@@ -40,7 +40,7 @@ chmod +x firepot
 ## Example
 
 ```text
-firepot 1.2.0 - node-a - 2026-09-06T21:02:11Z
+firepot 1.2.1 - node-a - 2026-09-06T21:02:11Z
 
 [OK  ] system           node-a, kernel 6.8.0-45-generic, up 12d 4h 9m
 [OK  ] load             0.42 0.31 0.28 on 8 cores (0.05/core)
@@ -72,7 +72,8 @@ Overall: CRIT (exit 2)
 - **Configurable thresholds** - warn and crit levels for load per core, memory, swap, disk, inodes, and zombies, from flags or a config file
 - **Multi-node** - `--host user@node` streams the script over SSH, validates each remote JSON report, and aggregates the results. Nothing is installed on the remote side
 - **Config files that cannot run code** - `--config` files are `key=value` and are parsed line by line, never sourced
-- **Single-file local checks** - bash 4+, coreutils, awk, and the standard tool for each probe (`df`, `ip`, `ss`, `systemctl`, `ping`, `getent`, `timedatectl`). Fleet aggregation also needs SSH and Python 3 on the originating host
+- **Single-file local checks** - bash 4+ and the standard tool for each probe (`df`, `ip`, `ss`, `systemctl`, `ping`, `getent`, `timedatectl`, `who`, `grep`; `timeout` when present). Thresholds, percentages, and JSON are computed in bash, so output is locale-independent. Fleet aggregation also needs SSH and Python 3 on the originating host
+- **Bounded probes** - `df` runs under a 10-second deadline (`FIREPOT_PROBE_TIMEOUT`), so a hung mount is reported as critical instead of stalling the run, and peers are pinged in parallel, so a run waits one ping timeout rather than one per peer
 - **Configured targets must be checked** - missing requested mounts or probe commands for configured services, ports, peers, or DNS are critical rather than silently skipped
 
 ## Usage
@@ -117,7 +118,7 @@ firepot --host admin@node-a --host admin@node-b --host admin@node-c --json
 
 ```json
 {
-  "node-healthcheck": "1.2.0",
+  "node-healthcheck": "1.2.1",
   "host": "node-a",
   "timestamp": "2026-09-06T21:02:11Z",
   "status": "crit",
@@ -132,7 +133,9 @@ firepot --host admin@node-a --host admin@node-b --host admin@node-c --json
 
 The version key is still named `"node-healthcheck"`, as it was before the rename, so existing parsers and mixed-version fleets keep working.
 
-In `--host` mode the top-level document has `nodes`, one entry per host, each in the shape above. A host that cannot be reached becomes `{"host": "...", "status": "crit", "error": "ssh failed with exit 255", "checks": []}`. Invalid remote JSON is also critical; it is never spliced into the aggregate.
+String metrics (`hostname`, `kernel`, `name`, `address`, `gateway`, `interface`) are always JSON strings; every other metric is a number.
+
+In `--host` mode the top-level document has `nodes`, one entry per host, each in the shape above. A host that cannot be reached becomes `{"host": "...", "status": "crit", "error": "ssh failed with exit 255", "checks": []}`. A remote that runs but exits with a code other than 0, 1, or 2 is reported as `remote run failed with exit N`. Invalid remote JSON is also critical (`invalid remote report`); it is never spliced into the aggregate.
 
 ### Config file
 
@@ -144,20 +147,20 @@ See [examples/firepot.conf](examples/firepot.conf). Keys mirror the long flags (
 firepot --host admin@node-a --host admin@node-b --services ssh --ports 22
 ```
 
-The script is sent to each host on standard input (`ssh host bash -s -- <flags>`), so the remote side needs only bash and an SSH login. The originating host needs Python 3 to validate each bounded remote JSON report before aggregation. `--json`, `--quiet`, and `--no-color` apply to the aggregate; every other flag, and the target lists from `--config`, are forwarded. Use `--ssh-opts` for keys or jump hosts and `--ssh-timeout` for slow links.
+The script is sent to each host on standard input (`ssh host bash -s -- <flags>`), so the remote side needs only bash and an SSH login. The originating host needs Python 3 to validate each remote JSON report, which is streamed into the validator and bounded to 1 MiB, before aggregation. `--json`, `--quiet`, and `--no-color` apply to the aggregate; the effective targets, selection, and thresholds (from flags or `--config`) are forwarded. Use `--ssh-opts` for keys or jump hosts and `--ssh-timeout` for slow links; the same value sets `ServerAliveInterval` (three missed replies end the connection), and `--ssh-opts` can override it.
 
 ## Checks
 
 | Check | What it measures | warn / crit |
 |---|---|---|
 | `system` | hostname, kernel, uptime | never |
-| `load` | 1-minute load divided by core count | 1.0 / 2.0 per core |
+| `load` | 1-minute load divided by online CPUs | 1.0 / 2.0 per core |
 | `memory` | `(MemTotal - MemAvailable) / MemTotal` | 80% / 95% |
 | `swap` | swap used; `info` when none is configured | 50% / 90% |
-| `disk` | space used per local filesystem (or `--mounts`) | 80% / 90% |
+| `disk` | space used per local filesystem (`df -l`, or `--mounts`) | 80% / 90% |
 | `inodes` | inodes used per local filesystem | 80% / 90% |
 | `network` | non-loopback IPv4 addresses present | warn if none |
-| `gateway` | default route exists and answers ping | warn no route / crit unreachable |
+| `gateway` | default route exists and its next hop answers ping (`info` for a point-to-point route) | warn no route / crit unreachable |
 | `dns` | `--dns NAME` resolves | crit |
 | `services` | `--services` units are active | crit |
 | `user_services` | `--user-services` units are active for the invoking user | crit |
@@ -171,7 +174,7 @@ The script is sent to each host on standard input (`ssh host bash -s -- <flags>`
 
 ## Renamed from node-healthcheck
 
-`firepot` 1.2.0 is the first release under the new name. Releases 1.0.0 and 1.1.0 shipped as `node-healthcheck`. For one release, the old name keeps working:
+`firepot` 1.2.0 is the first release under the new name. Releases 1.0.0 and 1.1.0 shipped as `node-healthcheck`. The old name keeps working for now:
 
 - `bin/node-healthcheck` is an identical copy of `bin/firepot` (a real file, so the old raw download URL still serves the script), and `scripts/setup.sh` also links `node-healthcheck` into the install directory (set `FIREPOT_LEGACY_LINK=0` to skip it). Invoked through the old name, the script prints a one-line deprecation note to stderr and then behaves identically. Fleet runs never print the note on remote hosts, so remote reports stay clean.
 - The `FIREPOT_PROC`, `FIREPOT_ROOT`, and `FIREPOT_INSTALL_DIR` variables replace the `NODE_HEALTHCHECK_*` names, which are still read as fallbacks.
