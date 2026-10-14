@@ -160,6 +160,8 @@ for v in WARN_LOAD CRIT_LOAD WARN_MEM CRIT_MEM WARN_SWAP CRIT_SWAP WARN_DISK CRI
          WARN_INODES CRIT_INODES PING_TIMEOUT SSH_TIMEOUT PROBE_TIMEOUT; do
     [[ "${!v}" =~ ^-?[0-9]{1,9}([.][0-9]{1,9})?$ ]] || die "$v must be numeric, got '${!v}'"
 done
+# timeout(1) rejects a negative deadline, which would read as "no filesystems found".
+[[ "$PROBE_TIMEOUT" != -* ]] || die "FIREPOT_PROBE_TIMEOUT must not be negative, got '$PROBE_TIMEOUT'"
 for v in WARN_ZOMBIES CRIT_ZOMBIES; do
     [[ "${!v}" =~ ^[0-9]{1,18}$ ]] || die "$v must be an integer, got '${!v}'"
 done

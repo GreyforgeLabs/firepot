@@ -400,6 +400,7 @@ assert_eq 2 "$RC" "hung requested mount is critical"
 assert_contains "$(jget "$OUT" 'd["checks"][0]["summary"]')" "no answer within 1s: /nfs" "hung mount named"
 if (( SECONDS - start < 15 )); then pass; else fail "df hang was not bounded"; fi
 FIREPOT_PROBE_TIMEOUT=abc run_nhc --json --check disk; assert_eq 3 "$RC" "invalid probe timeout"
+FIREPOT_PROBE_TIMEOUT=-1 run_nhc --json --check disk; assert_eq 3 "$RC" "negative probe timeout is a usage error"
 
 begin "gateway handles point-to-point and multipath default routes"
 reset_env

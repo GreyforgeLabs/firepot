@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 
-- `FIREPOT_PROBE_TIMEOUT` sets the time limit for filesystem probes (default 10 seconds), so a stuck mount can no longer hang a run.
+- `FIREPOT_PROBE_TIMEOUT` sets the time limit for filesystem probes in seconds (default 10; a negative value is a usage error), so a stuck mount can no longer hang a run.
 
 ### Fixed
 
