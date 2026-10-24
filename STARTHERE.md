@@ -34,6 +34,7 @@ firepot/
 
 - bash 4.0 or newer (any Linux distribution); no awk, sed, or jq needed
 - Optional per check: `df`, `ip`, `ss` or `netstat`, `systemctl`, `ping`, `getent`, `timedatectl`, `who`, `grep`; `timeout` bounds `df`
+- Fleet mode (`--host`) only: `ssh`, `python3`, and `mktemp` on the originating host
 - Tests only: python3
 - No root required
 
@@ -63,6 +64,7 @@ bash tests/run.sh
 
 - Flags: see `bin/firepot --help`
 - Config file: `--config FILE`, format in `examples/firepot.conf`
+- Fleet: `--host` (repeatable), `--parallel N` hosts at once (default 8), `--ssh-opts`, `--ssh-timeout`; each host's result lands in a temporary directory that every exit removes
 - Test hooks: `FIREPOT_PROC` (alternate `/proc` root) and `FIREPOT_ROOT` (alternate filesystem root for `/var/run/reboot-required` and `/sys/devices/system/cpu/online`); the pre-rename `NODE_HEALTHCHECK_PROC` and `NODE_HEALTHCHECK_ROOT` are read as fallbacks. `FIREPOT_PROBE_TIMEOUT` (default 10 seconds) is the `df` deadline
 - Compatibility: the JSON version key stays `"node-healthcheck"`; invoking the script as `node-healthcheck` prints a one-line stderr deprecation note (never on fleet remotes)
 

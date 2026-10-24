@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Fleet mode queries hosts in parallel, eight at a time by default; `--parallel N` (config key `parallel`) sets the limit. Results are still reported in `--host` order. Twelve hosts with half a second of SSH latency each finish in about 1.1 seconds instead of 6.3.
+- A failed fleet node reports why: JSON error entries carry a `detail` field with the last line ssh or the remote command wrote to stderr (for example `Connection refused`), and text mode appends it to the error line. The `error` strings are unchanged.
+
+### Fixed
+
+- `--quiet` now applies to fleet output as documented: only nodes that are not ok are listed.
+- `--ping-timeout 0` made `ping` wait forever for an unreachable peer or gateway, and a negative value reported every peer as unreachable; both are now usage errors. `--ssh-timeout` must be a whole number of seconds above 0, because ssh treats 0 (and a fraction it rounds down to 0) as no timeout and rejects negative values, which marked every host as `ssh failed`.
+- When the reader of firepot's output goes away (`firepot | head -1`), the run ends quietly by SIGPIPE, like any other filter, instead of printing `unexpected runtime error`.
+
 ## [1.3.0] - 2026-10-14
 
 ### Added

@@ -70,9 +70,9 @@ Overall: CRIT (exit 2)
 - **Meaningful exit codes** - `0` healthy, `1` warning, `2` critical, `3` usage or runtime error. `cron` jobs, CI steps, and wrappers can branch on the result without parsing text
 - **JSON output** - `--json` emits one document with per-check `status`, `summary`, and numeric `metrics`, generated without `jq`
 - **Configurable thresholds** - warn and crit levels for load per core, memory, swap, disk, inodes, and zombies, from flags or a config file
-- **Multi-node** - `--host user@node` streams the script over SSH, validates each remote JSON report, and aggregates the results. Nothing is installed on the remote side
+- **Multi-node** - `--host user@node` streams the script over SSH to up to eight hosts at once, validates each remote JSON report, and aggregates the results in `--host` order. Nothing is installed on the remote side
 - **Config files that cannot run code** - `--config` files are `key=value` and are parsed line by line, never sourced
-- **Single-file local checks** - bash 4+ and the standard tool for each probe (`df`, `ip`, `ss`, `systemctl`, `ping`, `getent`, `timedatectl`, `who`, `grep`; `timeout` when present). Thresholds, percentages, and JSON are computed in bash, so output is locale-independent. Fleet aggregation also needs SSH and Python 3 on the originating host
+- **Single-file local checks** - bash 4+ and the standard tool for each probe (`df`, `ip`, `ss`, `systemctl`, `ping`, `getent`, `timedatectl`, `who`, `grep`; `timeout` when present). Thresholds, percentages, and JSON are computed in bash, so output is locale-independent. Fleet aggregation also needs SSH, Python 3, and `mktemp` on the originating host
 - **Bounded probes** - `df` runs under a 10-second deadline (`FIREPOT_PROBE_TIMEOUT`), so a hung mount is reported as critical instead of stalling the run, and peers are pinged in parallel, so a run waits one ping timeout rather than one per peer
 - **Configured targets must be checked** - missing requested mounts or probe commands for configured services, ports, peers, or DNS are critical rather than silently skipped
 
@@ -112,7 +112,7 @@ firepot --host admin@node-a --host admin@node-b --host admin@node-c --json
 | `0` | every selected check is `ok`, `info`, or an unconfigured optional `skip` |
 | `1` | at least one `warn`, no `crit` |
 | `2` | at least one `crit`, including an uncheckable configured target or invalid/unreachable remote report |
-| `3` | usage error, invalid threshold, unreadable config, unknown check |
+| `3` | usage error, invalid threshold or timeout, unreadable config, unknown check |
 
 ### JSON shape
 
@@ -135,7 +135,7 @@ The version key is still named `"node-healthcheck"`, as it was before the rename
 
 String metrics (`hostname`, `kernel`, `name`, `address`, `gateway`, `interface`) are always JSON strings; every other metric is a number.
 
-In `--host` mode the top-level document has `nodes`, one entry per host, each in the shape above. A host that cannot be reached becomes `{"host": "...", "status": "crit", "error": "ssh failed with exit 255", "checks": []}`. A remote that runs but exits with a code other than 0, 1, or 2 is reported as `remote run failed with exit N`. Invalid remote JSON is also critical (`invalid remote report`); it is never spliced into the aggregate.
+In `--host` mode the top-level document has `nodes`, one entry per host, each in the shape above. A host that cannot be reached becomes `{"host": "...", "status": "crit", "error": "ssh failed with exit 255", "detail": "ssh: connect to host ... Connection refused", "checks": []}`. A remote that runs but exits with a code other than 0, 1, or 2 is reported as `remote run failed with exit N`. Invalid remote JSON is also critical (`invalid remote report`); it is never spliced into the aggregate. `detail`, present when there is one, is the last line ssh (or the remote command) wrote to stderr, with control characters removed; the `error` strings stay fixed so scripts can match them.
 
 ### Config file
 
@@ -147,7 +147,7 @@ See [examples/firepot.conf](examples/firepot.conf). Keys mirror the long flags (
 firepot --host admin@node-a --host admin@node-b --services ssh --ports 22
 ```
 
-The script is sent to each host on standard input (`ssh host bash -s -- <flags>`), so the remote side needs only bash and an SSH login. The originating host needs Python 3 to validate each remote JSON report, which is streamed into the validator and bounded to 1 MiB, before aggregation. `--json`, `--quiet`, and `--no-color` apply to the aggregate; the effective targets, selection, and thresholds (from flags or `--config`) are forwarded. Use `--ssh-opts` for keys or jump hosts and `--ssh-timeout` for slow links; the same value sets `ServerAliveInterval` (three missed replies end the connection), and `--ssh-opts` can override it.
+The script is sent to each host on standard input (`ssh host bash -s -- <flags>`), so the remote side needs only bash and an SSH login. The originating host needs Python 3 to validate each remote JSON report, which is streamed into the validator and bounded to 1 MiB, before aggregation. `--json`, `--quiet` (only nodes that are not ok are listed), and `--no-color` apply to the aggregate; the effective targets, selection, and thresholds (from flags or `--config`) are forwarded. Hosts are queried in parallel, eight at a time by default (`--parallel N`, or `parallel` in the config file), and reported in the order given. Use `--ssh-opts` for keys or jump hosts and `--ssh-timeout` (whole seconds) for slow links; the same value sets `ServerAliveInterval` (three missed replies end the connection), and `--ssh-opts` can override it. A failed node's line names the reason, for example `ssh failed with exit 255: ssh: connect to host node-c port 22: Connection refused`.
 
 ## Checks
 
