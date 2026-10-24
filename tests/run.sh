@@ -104,6 +104,8 @@ host=""; while [[ $# -gt 0 ]]; do case "$1" in -o) shift 2; continue;; --) shift
 [[ "$host" == "down.example" ]] && exit 255
 [[ "$host" == "bad-report.example" ]] && { printf "%s\n" "{not-json"; exit 0; }
 [[ "$host" == "usage.example" ]] && { echo "firepot: unknown option" >&2; exit 3; }
+[[ "$host" == "refused.example" ]] && { printf "Warning: noise\nssh: connect to host refused.example port 22: Connection refused\r\n\n" >&2; exit 255; }
+[[ "$host" == slow-* ]] && sleep "${FAKE_SSH_DELAY:-1}"
 export FAKE_HOSTNAME="$host"
 exec bash -c "$1"'
 
@@ -343,6 +345,63 @@ assert_eq 2 "$RC" "remote usage error is critical"
 assert_eq "remote run failed with exit 3" "$(jget "$OUT" 'd["nodes"][0]["error"]')" "remote exit 3 is not reported as an ssh failure"
 run_nhc --no-color --host node-a --check services --services 'a"b'
 assert_contains "$(cat "$OUT")" '[crit] services: inactive: a"b (0/1 active)' "text fleet summary decodes JSON escapes"
+
+begin "fleet errors carry the remote's reason"
+reset_env
+run_nhc --json --host refused.example --host usage.example --check load
+assert_eq 2 "$RC" "failed nodes are critical"
+assert_json_valid "$OUT" "aggregate with error details"
+assert_eq "ssh failed with exit 255" "$(jget "$OUT" 'd["nodes"][0]["error"]')" "error string unchanged"
+assert_eq "ssh: connect to host refused.example port 22: Connection refused" "$(jget "$OUT" 'd["nodes"][0]["detail"]')" "ssh's last stderr line is the detail"
+assert_eq "firepot: unknown option" "$(jget "$OUT" 'd["nodes"][1]["detail"]')" "remote stderr is the detail"
+run_nhc --json --host down.example --check load
+assert_eq "False" "$(jget "$OUT" '"detail" in d["nodes"][0]')" "no detail key without stderr"
+run_nhc --no-color --host refused.example --check load
+assert_contains "$(cat "$OUT")" "    ssh failed with exit 255: ssh: connect to host refused.example port 22: Connection refused" "text detail"
+
+begin "fleet --quiet prints only failing nodes"
+reset_env
+run_nhc --no-color --quiet --host node-a --host down.example --check load
+assert_eq 2 "$RC" "quiet fleet exit"
+assert_not_contains "$(cat "$OUT")" "node-a" "ok node hidden"
+assert_contains "$(cat "$OUT")" "[CRIT] down.example" "crit node shown"
+assert_contains "$(cat "$OUT")" "Overall: CRIT (exit 2)" "quiet fleet summary"
+
+begin "fleet hosts are queried in parallel, reported in order"
+reset_env
+start=$SECONDS
+FAKE_SSH_DELAY=2 run_nhc --json --host slow-a --host slow-b --host slow-c --host slow-d --host node-e --check load
+elapsed=$(( SECONDS - start ))
+assert_eq 0 "$RC" "parallel fleet exit"
+assert_eq "['slow-a', 'slow-b', 'slow-c', 'slow-d', 'node-e']" "$(jget "$OUT" '[n["host"] for n in d["nodes"]]')" "node order follows --host order"
+if (( elapsed < 6 )); then pass; else fail "4 hosts x 2 s took ${elapsed}s; expected them to overlap"; fi
+FAKE_SSH_DELAY=1 run_nhc --json --parallel 1 --host slow-a --host node-b --check load
+assert_eq "['slow-a', 'node-b']" "$(jget "$OUT" '[n["host"] for n in d["nodes"]]')" "--parallel 1 runs one at a time"
+printf 'parallel = 2\n' > "$TMP/parallel.conf"
+run_nhc --json --config "$TMP/parallel.conf" --host node-a --host node-b --host node-c --check load
+assert_eq 3 "$(jget "$OUT" 'len(d["nodes"])')" "parallel config key"
+assert_eq "" "$(jget "$OUT" '"".join(n.get("error", "") for n in d["nodes"])')" "parallel is not forwarded to remotes"
+for bad in 0 -1 abc 1.5; do run_nhc --parallel "$bad" --host node-a; assert_eq 3 "$RC" "--parallel $bad is a usage error"; done
+
+begin "timeouts that would hang or always fail are usage errors"
+reset_env
+for bad in 0 -1 0.0; do run_nhc --check peers --peers 203.0.113.1 --ping-timeout "$bad"; assert_eq 3 "$RC" "--ping-timeout $bad"; done
+run_nhc --json --check peers --peers 203.0.113.1 --ping-timeout 0.5; assert_eq 0 "$RC" "fractional ping timeout"
+for bad in 0 -1 2.5; do run_nhc --host node-a --ssh-timeout "$bad"; assert_eq 3 "$RC" "--ssh-timeout $bad"; done
+assert_contains "$(cat "$TMP/err.txt")" "--ssh-timeout" "message names the option"
+
+begin "a closed output pipe ends quietly"
+reset_env
+closed_pipe() { # runs the script with stdout on a pipe whose reader is gone; prints rc (-13 = SIGPIPE) then stderr
+    PATH="$BIN:$PATH" FIREPOT_PROC="$PROC" FIREPOT_ROOT="$FSROOT" FAKE_DF_K="$FIX/df-k.txt" FAKE_DF_I="$FIX/df-i.txt" \
+        python3 -c 'import os, subprocess, sys
+r, w = os.pipe(); os.close(r)
+p = subprocess.run(sys.argv[1:], stdout=w, stderr=subprocess.PIPE)
+print(p.returncode); sys.stdout.write(p.stderr.decode())' "$SCRIPT" "$@"
+}
+assert_eq -13 "$(closed_pipe --no-color --check load,memory)" "text: killed by SIGPIPE like any filter, no error message"
+assert_eq -13 "$(closed_pipe --json --check load)" "json: killed by SIGPIPE like any filter, no error message"
+assert_eq -13 "$(closed_pipe --no-color --host node-a --check load)" "fleet: killed by SIGPIPE like any filter, no error message"
 
 begin "lists are never glob-expanded"
 reset_env

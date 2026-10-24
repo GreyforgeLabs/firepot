@@ -19,10 +19,18 @@ NHC_VERSION="1.3.0"
 
 # Any exit that does not go through finish() is an unexpected runtime error,
 # which the exit-code contract reports as 3 (never as a health state).
+# Fleet mode keeps per-host results in FP_TMP, which every exit removes.
 FP_DONE=0
-trap '(( FP_DONE )) || { echo "firepot: unexpected runtime error" >&2; exit 3; }' EXIT
+FP_TMP=""
+trap '[[ -z "$FP_TMP" ]] || rm -rf -- "$FP_TMP"; (( FP_DONE )) || { echo "firepot: unexpected runtime error" >&2; exit 3; }' EXIT
+# A reader that goes away (firepot | head) ends the run the way it ends any
+# filter: killed by SIGPIPE, without an error message. Writes to stdout go
+# through out(), which hides the shell's "write error" line for the same reason.
+trap 'FP_DONE=1; trap - PIPE; kill -PIPE "$$"' PIPE
 # shellcheck disable=SC2034  # read by the EXIT trap
 finish() { FP_DONE=1; exit "$1"; }
+# shellcheck disable=SC2059  # out() takes printf's format as its first argument
+out() { printf "$@" 2>/dev/null; }
 
 # Deprecated alias: the tool was called node-healthcheck before 1.2.0, and that
 # name keeps working for now. Invoking it through the old name prints one note
@@ -52,11 +60,11 @@ WARN_ZOMBIES="5"; CRIT_ZOMBIES="50"
 
 SERVICES=""; USER_SERVICES=""; PORTS=""; PEERS=""; DNS=""; MOUNTS=""
 CHECKS=""; SKIP=""; HOSTS=""
-JSON=0; QUIET=0; COLOR=1; PING_TIMEOUT="1"; SSH_TIMEOUT="10"; SSH_OPTS=""
+JSON=0; QUIET=0; COLOR=1; PING_TIMEOUT="1"; SSH_TIMEOUT="10"; SSH_OPTS=""; PARALLEL="8"
 
 # Config keys; each sets the variable of the same name in upper case, and each
 # except checks and hosts is also a long option (warn_load <-> --warn-load).
-KEYS="services user_services ports peers dns mounts checks skip hosts ssh_opts ssh_timeout ping_timeout"
+KEYS="services user_services ports peers dns mounts checks skip hosts ssh_opts ssh_timeout ping_timeout parallel"
 KEYS+=" warn_load crit_load warn_mem crit_mem warn_swap crit_swap warn_disk crit_disk warn_inodes crit_inodes warn_zombies crit_zombies"
 is_key() { [[ " $KEYS " == *" $1 "* ]]; }
 
@@ -85,7 +93,8 @@ Targets:
   --mounts LIST          Mount points to check (default: all local filesystems)
   --host HOST            Run remotely over SSH (repeatable; implies aggregation)
   --ssh-opts "OPTS"      Extra ssh options for --host
-  --ssh-timeout SECONDS  ssh ConnectTimeout (default: ${SSH_TIMEOUT})
+  --ssh-timeout SECONDS  ssh ConnectTimeout, whole seconds (default: ${SSH_TIMEOUT})
+  --parallel N           Hosts queried at once with --host (default: ${PARALLEL})
   --ping-timeout SECONDS ping wait per peer (default: ${PING_TIMEOUT})
 
 Thresholds:
@@ -165,6 +174,11 @@ done
 for v in WARN_ZOMBIES CRIT_ZOMBIES; do
     [[ "${!v}" =~ ^[0-9]{1,18}$ ]] || die "$v must be an integer, got '${!v}'"
 done
+# ping -W 0 waits forever and rejects a negative wait, which would read as an
+# unreachable peer. ssh takes whole seconds and treats 0 as no timeout at all.
+[[ "$PING_TIMEOUT" != -* && "$PING_TIMEOUT" == *[1-9]* ]] || die "--ping-timeout must be above 0, got '$PING_TIMEOUT'"
+[[ "$SSH_TIMEOUT" =~ ^[0-9]+$ && "$SSH_TIMEOUT" == *[1-9]* ]] || die "--ssh-timeout must be a whole number of seconds above 0, got '$SSH_TIMEOUT'"
+[[ "$PARALLEL" =~ ^[1-9][0-9]{0,3}$ ]] || die "--parallel must be a whole number from 1 to 9999, got '$PARALLEL'"
 
 # ── Check selection ──────────────────────────────────────────────────────────
 
@@ -258,7 +272,7 @@ record() {
     if (( ! JSON )); then
         if (( QUIET )) && [[ "$status" != "warn" && "$status" != "crit" ]]; then return 0; fi
         paint "$status"
-        printf '%s[%-4s]%s %-16s %s\n' "$C" "${status^^}" "$R" "$name" "$summary"
+        out '%s[%-4s]%s %-16s %s\n' "$C" "${status^^}" "$R" "$name" "$summary"
     fi
 }
 
@@ -624,7 +638,7 @@ run_local() {
     host_name
     if (( ! JSON )); then
         now_utc
-        printf 'firepot %s - %s - %s\n\n' "$NHC_VERSION" "$HOST" "$NOW"
+        out 'firepot %s - %s - %s\n\n' "$NHC_VERSION" "$HOST" "$NOW"
     fi
     for c in "${SELECTED[@]+"${SELECTED[@]}"}"; do "check_$c"; done
     if (( JSON )); then
@@ -633,11 +647,11 @@ run_local() {
         now_utc; jstr "$HOST"
         # The "node-healthcheck" version key predates the rename and is kept for
         # existing consumers and mixed-version fleets.
-        printf '{"node-healthcheck":"%s","host":%s,"timestamp":"%s","status":"%s","exit_code":%d,"checks":[%s]}\n' \
+        out '{"node-healthcheck":"%s","host":%s,"timestamp":"%s","status":"%s","exit_code":%d,"checks":[%s]}\n' \
             "$NHC_VERSION" "$REPLY" "$NOW" "$WORST_STATUS" "$OVERALL" "$joined"
     else
         paint "$WORST_STATUS"
-        printf '\nOverall: %s%s%s (exit %d)\n' "$C" "${WORST_STATUS^^}" "$R" "$OVERALL"
+        out '\nOverall: %s%s%s (exit %d)\n' "$C" "${WORST_STATUS^^}" "$R" "$OVERALL"
     fi
     finish "$OVERALL"
 }
@@ -649,7 +663,7 @@ remote_args() {
     local args=() key var
     for key in $KEYS; do
         var="${key^^}"
-        case "$key" in hosts|ssh_*) continue ;; checks) key=check ;; esac
+        case "$key" in hosts|ssh_*|parallel) continue ;; checks) key=check ;; esac
         [[ -z "${!var}" ]] || args+=("--${key//_/-}" "${!var}")
     done
     printf -v REMOTE_ARGS '%q ' "${args[@]}" --json
@@ -694,24 +708,61 @@ if sys.argv[2] == "0":
             print("    [%s] %s: %s" % (c["status"], clean(c["name"]), clean(c["summary"])))
 '
 
+# query_host HOST OUT ERR: one remote run, as a background job. The report
+# streams straight into the bounded validator, so a runaway remote cannot fill
+# memory here. OUT gets the validator's output and a last line holding the ssh
+# and validator exit codes; ERR gets ssh's stderr, which includes the remote's.
+# ServerAlive* ends dead connections; ssh keeps the first value given, so
+# --ssh-opts can override those two.
+query_host() (
+    set +e
+    ssh -o BatchMode=yes -o ConnectTimeout="$SSH_TIMEOUT" "${SSH_ARGS[@]+"${SSH_ARGS[@]}"}" \
+        -o ServerAliveInterval="$SSH_TIMEOUT" -o ServerAliveCountMax=3 \
+        -- "$1" "bash -s -- $REMOTE_ARGS" < "$SCRIPT_FILE" 2> "$3" \
+        | python3 -c "$VALIDATOR" "$NHC_VERSION" "$JSON" > "$2"
+    printf '\n%s %s' "${PIPESTATUS[@]}" >> "$2"
+)
+
+# err_detail FILE: REPLY = the last non-blank line of FILE (ssh's own message,
+# or the remote's last error), stripped of control characters and capped.
+err_detail() {
+    local text="" line
+    REPLY=""
+    [[ -s "$1" ]] || return 0
+    if has tail; then { text="$(tail -c 4096 -- "$1")"; } 2>/dev/null || true
+    else read -r -N 4096 text < "$1" || true; fi
+    while IFS= read -r line; do
+        line="${line//[$'\t\r']/ }"; line="${line//["$CTRL"]/}"
+        [[ -z "${line//[[:space:]]/}" ]] || REPLY="$line"
+    done <<< "$text"
+    REPLY="${REPLY#"${REPLY%%[![:space:]]*}"}"; REPLY="${REPLY%"${REPLY##*[![:space:]]}"}"
+    (( ${#REPLY} <= 300 )) || REPLY="${REPLY:0:300}..."
+}
+
 run_remote() {
     has ssh || die "ssh is required for --host"
     has python3 || die "python3 is required on the originating host for --host report validation"
-    local script="${BASH_SOURCE[0]:-}"
-    [[ -f "$script" && -r "$script" ]] || die "--host needs firepot to run from a readable file"
-    local host result body rc src vrc nodes="" node_status worst=0 worst_status="ok" error ssh_opts=() details
-    read -r -a ssh_opts <<< "$SSH_OPTS"
+    SCRIPT_FILE="${BASH_SOURCE[0]:-}"
+    [[ -f "$SCRIPT_FILE" && -r "$SCRIPT_FILE" ]] || die "--host needs firepot to run from a readable file"
+    FP_TMP="$(mktemp -d "${TMPDIR:-/tmp}/firepot.XXXXXX")" || die "cannot create a temporary directory"
+    local hosts=() i running=0 result body rc src vrc nodes="" node_status worst=0 worst_status="ok" error detail details
+    read -r -a SSH_ARGS <<< "$SSH_OPTS"
     remote_args
     split_list "$HOSTS"
-    for host in "${LIST[@]+"${LIST[@]}"}"; do
-        # The report streams straight into the bounded validator, so a runaway
-        # remote cannot fill memory here. ServerAlive* ends dead connections;
-        # ssh keeps the first value given, so --ssh-opts can override those two.
-        result="$(ssh -o BatchMode=yes -o ConnectTimeout="$SSH_TIMEOUT" "${ssh_opts[@]+"${ssh_opts[@]}"}" \
-                      -o ServerAliveInterval="$SSH_TIMEOUT" -o ServerAliveCountMax=3 \
-                      -- "$host" "bash -s -- $REMOTE_ARGS" < "$script" 2>/dev/null \
-                  | python3 -c "$VALIDATOR" "$NHC_VERSION" "$JSON"; printf '\n%s %s' "${PIPESTATUS[@]}")"
-        read -r src vrc <<< "${result##*$'\n'}"
+    hosts=("${LIST[@]+"${LIST[@]}"}")
+    # Up to PARALLEL hosts at once; bash before 4.3 has no "wait -n" and waits per batch.
+    for i in "${!hosts[@]}"; do
+        if (( running >= PARALLEL )); then
+            if (( BASH_VERSINFO[0] > 4 || BASH_VERSINFO[1] >= 3 )); then wait -n || true; running=$(( running - 1 ))
+            else wait || true; running=0; fi
+        fi
+        query_host "${hosts[i]}" "$FP_TMP/$i.out" "$FP_TMP/$i.err" &
+        running=$(( running + 1 ))
+    done
+    wait || true
+    for i in "${!hosts[@]}"; do
+        result=""; IFS= read -r -d '' result < "$FP_TMP/$i.out" || true
+        src=""; vrc=""; read -r src vrc <<< "${result##*$'\n'}"
         body="${result%$'\n'*}"
         details=""
         if [[ "$vrc" == 0 && "$src" == [012] && "${body%%$'\n'*}" == "$src" ]]; then
@@ -724,24 +775,28 @@ run_remote() {
             if [[ "$src" == 255 ]]; then error="ssh failed with exit 255"
             elif [[ "$vrc" == 2 || "$src" == [012] ]]; then error="invalid remote report (exit $src)"
             else error="remote run failed with exit $src"; fi
-            jstr "$host"; nodes+="${nodes:+,}{\"node-healthcheck\":\"$NHC_VERSION\",\"host\":$REPLY"
-            nodes+=",\"status\":\"crit\",\"exit_code\":2,\"error\":\"$error\",\"checks\":[]}"
-            details="    $error"
+            err_detail "$FP_TMP/$i.err"; detail="$REPLY"
+            jstr "${hosts[i]}"; nodes+="${nodes:+,}{\"node-healthcheck\":\"$NHC_VERSION\",\"host\":$REPLY"
+            nodes+=",\"status\":\"crit\",\"exit_code\":2,\"error\":\"$error\""
+            if [[ -n "$detail" ]]; then jstr "$detail"; nodes+=",\"detail\":$REPLY"; fi
+            nodes+=",\"checks\":[]}"
+            details="    $error${detail:+: $detail}"
         fi
         if (( rc > worst )); then worst=$rc; worst_status=$node_status; fi
-        if (( ! JSON )); then
+        # --quiet prints only the nodes that are not ok.
+        if (( ! JSON )) && { (( ! QUIET )) || [[ "$node_status" != ok ]]; }; then
             paint "$node_status"
-            printf '%s[%-4s]%s %s\n' "$C" "${node_status^^}" "$R" "$host"
-            [[ "$node_status" == ok || -z "$details" ]] || printf '%s\n' "$details"
+            out '%s[%-4s]%s %s\n' "$C" "${node_status^^}" "$R" "${hosts[i]}"
+            [[ "$node_status" == ok || -z "$details" ]] || out '%s\n' "$details"
         fi
     done
     if (( JSON )); then
         now_utc
-        printf '{"node-healthcheck":"%s","timestamp":"%s","status":"%s","exit_code":%d,"nodes":[%s]}\n' \
+        out '{"node-healthcheck":"%s","timestamp":"%s","status":"%s","exit_code":%d,"nodes":[%s]}\n' \
             "$NHC_VERSION" "$NOW" "$worst_status" "$worst" "$nodes"
     else
         paint "$worst_status"
-        printf '\nOverall: %s%s%s (exit %d)\n' "$C" "${worst_status^^}" "$R" "$worst"
+        out '\nOverall: %s%s%s (exit %d)\n' "$C" "${worst_status^^}" "$R" "$worst"
     fi
     finish "$worst"
 }
