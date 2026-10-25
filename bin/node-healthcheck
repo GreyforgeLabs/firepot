@@ -15,7 +15,7 @@ set -euo pipefail
 # Parse every probe's output in one predictable locale.
 export LC_ALL=C
 
-NHC_VERSION="1.3.0"
+NHC_VERSION="1.4.0"
 
 # Any exit that does not go through finish() is an unexpected runtime error,
 # which the exit-code contract reports as 3 (never as a health state).

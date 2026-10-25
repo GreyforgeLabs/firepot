@@ -50,7 +50,7 @@ firepot/
 
 ```bash
 bin/firepot --version
-# Expected output: firepot 1.3.0
+# Expected output: firepot 1.4.0
 bash tests/run.sh
 # Expected output: firepot tests: N passed, 0 failed
 ```

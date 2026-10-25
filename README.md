@@ -40,7 +40,7 @@ chmod +x firepot
 ## Example
 
 ```text
-firepot 1.3.0 - node-a - 2026-09-06T21:02:11Z
+firepot 1.4.0 - node-a - 2026-09-06T21:02:11Z
 
 [OK  ] system           node-a, kernel 6.8.0-45-generic, up 12d 4h 9m
 [OK  ] load             0.42 0.31 0.28 on 8 cores (0.05/core)
@@ -118,7 +118,7 @@ firepot --host admin@node-a --host admin@node-b --host admin@node-c --json
 
 ```json
 {
-  "node-healthcheck": "1.3.0",
+  "node-healthcheck": "1.4.0",
   "host": "node-a",
   "timestamp": "2026-09-06T21:02:11Z",
   "status": "crit",
