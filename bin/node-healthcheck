@@ -22,7 +22,8 @@ NHC_VERSION="1.3.0"
 # Fleet mode keeps per-host results in FP_TMP, which every exit removes.
 FP_DONE=0
 FP_TMP=""
-trap '[[ -z "$FP_TMP" ]] || rm -rf -- "$FP_TMP"; (( FP_DONE )) || { echo "firepot: unexpected runtime error" >&2; exit 3; }' EXIT
+# Unfinished host queries are stopped first, so none writes into a removed FP_TMP.
+trap '[[ -z "$FP_TMP" ]] || { kill $(jobs -p) 2>/dev/null || true; rm -rf -- "$FP_TMP"; }; (( FP_DONE )) || { echo "firepot: unexpected runtime error" >&2; exit 3; }' EXIT
 # A reader that goes away (firepot | head) ends the run the way it ends any
 # filter: killed by SIGPIPE, without an error message. Writes to stdout go
 # through out(), which hides the shell's "write error" line for the same reason.
@@ -93,7 +94,7 @@ Targets:
   --mounts LIST          Mount points to check (default: all local filesystems)
   --host HOST            Run remotely over SSH (repeatable; implies aggregation)
   --ssh-opts "OPTS"      Extra ssh options for --host
-  --ssh-timeout SECONDS  ssh ConnectTimeout, whole seconds (default: ${SSH_TIMEOUT})
+  --ssh-timeout SECONDS  ssh ConnectTimeout (default: ${SSH_TIMEOUT})
   --parallel N           Hosts queried at once with --host (default: ${PARALLEL})
   --ping-timeout SECONDS ping wait per peer (default: ${PING_TIMEOUT})
 
@@ -175,9 +176,12 @@ for v in WARN_ZOMBIES CRIT_ZOMBIES; do
     [[ "${!v}" =~ ^[0-9]{1,18}$ ]] || die "$v must be an integer, got '${!v}'"
 done
 # ping -W 0 waits forever and rejects a negative wait, which would read as an
-# unreachable peer. ssh takes whole seconds and treats 0 as no timeout at all.
+# unreachable peer. ssh rejects a negative timeout and treats 0 as none at all;
+# it takes whole seconds, so a fraction is rounded down as ssh itself does
+# (2.5 -> 2), but never below 1 second.
 [[ "$PING_TIMEOUT" != -* && "$PING_TIMEOUT" == *[1-9]* ]] || die "--ping-timeout must be above 0, got '$PING_TIMEOUT'"
-[[ "$SSH_TIMEOUT" =~ ^[0-9]+$ && "$SSH_TIMEOUT" == *[1-9]* ]] || die "--ssh-timeout must be a whole number of seconds above 0, got '$SSH_TIMEOUT'"
+[[ "$SSH_TIMEOUT" != -* && "$SSH_TIMEOUT" == *[1-9]* ]] || die "--ssh-timeout must be above 0, got '$SSH_TIMEOUT'"
+SSH_TIMEOUT=$(( 10#${SSH_TIMEOUT%%.*} )); (( SSH_TIMEOUT >= 1 )) || SSH_TIMEOUT=1
 [[ "$PARALLEL" =~ ^[1-9][0-9]{0,3}$ ]] || die "--parallel must be a whole number from 1 to 9999, got '$PARALLEL'"
 
 # ── Check selection ──────────────────────────────────────────────────────────
@@ -716,11 +720,13 @@ if sys.argv[2] == "0":
 # --ssh-opts can override those two.
 query_host() (
     set +e
+    # Background jobs ignore Ctrl-C unless told otherwise; ssh must not.
+    trap - INT QUIT
     ssh -o BatchMode=yes -o ConnectTimeout="$SSH_TIMEOUT" "${SSH_ARGS[@]+"${SSH_ARGS[@]}"}" \
         -o ServerAliveInterval="$SSH_TIMEOUT" -o ServerAliveCountMax=3 \
         -- "$1" "bash -s -- $REMOTE_ARGS" < "$SCRIPT_FILE" 2> "$3" \
         | python3 -c "$VALIDATOR" "$NHC_VERSION" "$JSON" > "$2"
-    printf '\n%s %s' "${PIPESTATUS[@]}" >> "$2"
+    { printf '\n%s %s' "${PIPESTATUS[@]}" >> "$2"; } 2>/dev/null
 )
 
 # err_detail FILE: REPLY = the last non-blank line of FILE (ssh's own message,

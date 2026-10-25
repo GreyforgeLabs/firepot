@@ -100,7 +100,7 @@ printf "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nLISTEN 0 128 [::]:8080 [::]:*\n"'
 shim timedatectl 'echo "${FAKE_NTP:-yes}"'
 shim who 'printf "alice pts/0 2026-09-06 10:00\nbob pts/1 2026-09-06 10:05\n"'
 shim ssh '# Simulates a remote host by running the piped script locally.
-host=""; while [[ $# -gt 0 ]]; do case "$1" in -o) shift 2; continue;; --) shift; host="$1"; shift; break;; *) shift;; esac; done
+host=""; while [[ $# -gt 0 ]]; do case "$1" in -o) [[ -n "${FAKE_SSH_LOG:-}" && "${2:-}" == ConnectTimeout=* ]] && echo "$2" >> "$FAKE_SSH_LOG"; shift 2; continue;; --) shift; host="$1"; shift; break;; *) shift;; esac; done
 [[ "$host" == "down.example" ]] && exit 255
 [[ "$host" == "bad-report.example" ]] && { printf "%s\n" "{not-json"; exit 0; }
 [[ "$host" == "usage.example" ]] && { echo "firepot: unknown option" >&2; exit 3; }
@@ -387,8 +387,19 @@ begin "timeouts that would hang or always fail are usage errors"
 reset_env
 for bad in 0 -1 0.0; do run_nhc --check peers --peers 203.0.113.1 --ping-timeout "$bad"; assert_eq 3 "$RC" "--ping-timeout $bad"; done
 run_nhc --json --check peers --peers 203.0.113.1 --ping-timeout 0.5; assert_eq 0 "$RC" "fractional ping timeout"
-for bad in 0 -1 2.5; do run_nhc --host node-a --ssh-timeout "$bad"; assert_eq 3 "$RC" "--ssh-timeout $bad"; done
+for bad in 0 -1 0.0; do run_nhc --host node-a --ssh-timeout "$bad"; assert_eq 3 "$RC" "--ssh-timeout $bad"; done
 assert_contains "$(cat "$TMP/err.txt")" "--ssh-timeout" "message names the option"
+# A fraction worked before (ssh rounds it down), so it is still accepted: rounded
+# down to whole seconds, but never to 0, which ssh reads as no timeout at all.
+for pair in 2.5:2 0.5:1 010:10; do
+    rm -f "$TMP/ssh.log"
+    FAKE_SSH_LOG="$TMP/ssh.log" run_nhc --json --host node-a --check load --ssh-timeout "${pair%%:*}"
+    assert_eq 0 "$RC" "--ssh-timeout ${pair%%:*} accepted"
+    assert_eq "ConnectTimeout=${pair##*:}" "$(cat "$TMP/ssh.log")" "--ssh-timeout ${pair%%:*} reaches ssh as ${pair##*:}"
+done
+printf 'ssh_timeout = 2.5\n' > "$TMP/ssh-timeout.conf"
+run_nhc --json --config "$TMP/ssh-timeout.conf" --host node-a --check load
+assert_eq 0 "$RC" "config ssh_timeout = 2.5 still works"
 
 begin "a closed output pipe ends quietly"
 reset_env
@@ -402,6 +413,22 @@ print(p.returncode); sys.stdout.write(p.stderr.decode())' "$SCRIPT" "$@"
 assert_eq -13 "$(closed_pipe --no-color --check load,memory)" "text: killed by SIGPIPE like any filter, no error message"
 assert_eq -13 "$(closed_pipe --json --check load)" "json: killed by SIGPIPE like any filter, no error message"
 assert_eq -13 "$(closed_pipe --no-color --host node-a --check load)" "fleet: killed by SIGPIPE like any filter, no error message"
+
+begin "Ctrl-C stops a fleet run and leaves no temporary files"
+reset_env
+mkdir -p "$TMP/fleet-tmp"
+interrupted="$(PATH="$BIN:$PATH" FIREPOT_PROC="$PROC" TMPDIR="$TMP/fleet-tmp" FAKE_SSH_DELAY=30 python3 -c 'import os, signal, subprocess, sys, time
+def child():  # a terminal foreground job: own process group, default SIGINT
+    os.setpgid(0, 0); signal.signal(signal.SIGINT, signal.SIG_DFL)
+start = time.time()
+p = subprocess.Popen(sys.argv[1:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=child)
+time.sleep(1); os.killpg(p.pid, signal.SIGINT)
+p.wait(); time.sleep(0.5)
+left = subprocess.run(["pgrep", "-g", str(p.pid)], capture_output=True).stdout.split()
+if left: os.killpg(p.pid, signal.SIGKILL)
+print("%d %d" % (time.time() - start < 10, len(left)))' "$SCRIPT" --json --host slow-a --host slow-b --check load)"
+assert_eq "1 0" "$interrupted" "interrupted promptly (1) with no process left behind (0)"
+assert_eq "" "$(ls -A "$TMP/fleet-tmp")" "temporary directory removed"
 
 begin "lists are never glob-expanded"
 reset_env

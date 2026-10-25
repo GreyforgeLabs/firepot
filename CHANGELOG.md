@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - `--quiet` now applies to fleet output as documented: only nodes that are not ok are listed.
-- `--ping-timeout 0` made `ping` wait forever for an unreachable peer or gateway, and a negative value reported every peer as unreachable; both are now usage errors. `--ssh-timeout` must be a whole number of seconds above 0, because ssh treats 0 (and a fraction it rounds down to 0) as no timeout and rejects negative values, which marked every host as `ssh failed`.
+- `--ping-timeout 0` made `ping` wait forever for an unreachable peer or gateway, and a negative value reported every peer as unreachable; both are now usage errors. `--ssh-timeout` must be above 0, because ssh treats 0 as no timeout and rejects negative values, which marked every host as `ssh failed`. A fractional value still works: it is rounded down to whole seconds, as ssh does, but never below 1 second (ssh rounded `0.5` down to no timeout).
 - When the reader of firepot's output goes away (`firepot | head -1`), the run ends quietly by SIGPIPE, like any other filter, instead of printing `unexpected runtime error`.
 
 ## [1.3.0] - 2026-10-14
