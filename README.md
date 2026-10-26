@@ -28,7 +28,7 @@ curl -fsSLO https://github.com/GreyforgeLabs/firepot/releases/latest/download/fi
 curl -fsSLO https://github.com/GreyforgeLabs/firepot/releases/latest/download/firepot.sha256
 sha256sum -c firepot.sha256
 install -Dm755 firepot ~/.local/bin/firepot
-firepot
+firepot --version
 ```
 
 It needs bash 4+ and the usual tools (`df`, `ip`, `ss`, `systemctl`, `ping`); fleet mode also needs SSH and Python 3 on the machine you run it from. Nothing is installed on the hosts you check.
