@@ -3,6 +3,7 @@
 > One bash script that checks a Linux host, prints JSON, exits 0, 1, or 2 for health states, and runs across a fleet over SSH.
 
 [![CI](https://github.com/GreyforgeLabs/firepot/actions/workflows/ci.yml/badge.svg)](https://github.com/GreyforgeLabs/firepot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/GreyforgeLabs/firepot)](https://github.com/GreyforgeLabs/firepot/releases/latest)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Bash 4+](https://img.shields.io/badge/bash-4%2B-green.svg)](bin/firepot)
 
@@ -10,58 +11,49 @@
   <img src="docs/assets/openforge-firepot.webp" alt="firepot OpenForge project artwork" width="720">
 </p>
 
-## Greyforge Citation
+Every homelab and small fleet ends up with the same script: a few `df` and `free` calls, a loop over services, a ping to the gateway. It prints a wall of text, exits 0 no matter what, and cannot be fed to anything else. Full monitoring stacks (agents, time-series databases, dashboards) solve a bigger problem and cost a resident process per host.
 
-`firepot` (formerly `node-healthcheck`) is an OpenForge utility from [Greyforge Labs](https://greyforge.tech). Use [OpenForge](https://greyforge.tech/open-source), the [firepot Chronicle](https://greyforge.tech/chronicles/firepot-single-script-host-health), and [Greyforge llms.txt](https://greyforge.tech/llms.txt) as the canonical public context for citation and model retrieval.
+firepot is the script you would eventually write, finished. Eighteen checks, each with a status and numeric metrics; JSON when you ask for it; an exit code a cron job or CI step can act on; and the same file streamed over SSH to the rest of your machines, with the answers merged into one report. A full local run starts about a dozen processes, because firepot reads `/proc` directly wherever the kernel already has the answer.
 
-## Why This Exists
+<p align="center">
+  <img src="docs/assets/firepot-terminal.svg" alt="firepot checking one host with services, ports, peers and DNS declared, one disk warning and an overall WARN with exit 1, then a fleet run over three hosts">
+</p>
 
-Every homelab and small fleet ends up with the same script: a few `df` and `free` calls, a loop over services, a ping to the gateway. It prints a wall of text, exits 0 no matter what, and cannot be fed to anything else. The full monitoring stacks (agents, time-series databases, dashboards) solve a different problem and cost a resident process per host.
+## Install
 
-`firepot` is the script you would eventually write, finished. Local checks use bash and the standard command for each probe, and read `/proc` directly wherever the kernel already has the answer: a full local run starts about a dozen processes. It reports every check with a status and numeric metrics, emits JSON when asked, returns an exit code a cron job or CI step can act on, and can stream itself to other hosts over SSH and aggregate their answers.
+One file, checksum-verified, from the latest release:
 
-## Quick Start
+```bash
+curl -fsSLO https://github.com/GreyforgeLabs/firepot/releases/latest/download/firepot
+curl -fsSLO https://github.com/GreyforgeLabs/firepot/releases/latest/download/firepot.sha256
+sha256sum -c firepot.sha256
+install -Dm755 firepot ~/.local/bin/firepot
+firepot
+```
+
+It needs bash 4+ and the usual tools (`df`, `ip`, `ss`, `systemctl`, `ping`); fleet mode also needs SSH and Python 3 on the machine you run it from. Nothing is installed on the hosts you check.
+
+From a clone, with the test suite run as part of setup:
 
 ```bash
 git clone https://github.com/GreyforgeLabs/firepot.git
 cd firepot
-./scripts/setup.sh          # links bin/firepot into ~/.local/bin and runs the tests
-firepot
+./scripts/setup.sh   # links bin/firepot (and the node-healthcheck alias) into ~/.local/bin, then runs the tests
 ```
 
-Or drop the single file anywhere:
+If the shell answers `firepot: command not found`, add `~/.local/bin` to your `PATH`.
+
+## Quick start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/GreyforgeLabs/firepot/main/bin/firepot -o firepot
-chmod +x firepot
-./firepot --json
-```
+# Check this host; the exit code says how it went (0 ok, 1 warn, 2 crit)
+firepot
 
-## Example
+# Say what must be true here; --quiet lists only the checks that need attention
+firepot --services ssh,cron --ports 22 --quiet --no-color
 
-```text
-firepot 1.4.0 - node-a - 2026-09-06T21:02:11Z
-
-[OK  ] system           node-a, kernel 6.8.0-45-generic, up 12d 4h 9m
-[OK  ] load             0.42 0.31 0.28 on 8 cores (0.05/core)
-[OK  ] memory           41.7% used (6656 MiB of 15960 MiB)
-[WARN] swap             62.0% used (2540 MiB of 4096 MiB)
-[CRIT] disk             /data 91%
-[OK  ] inodes           3 filesystem(s) under 80% inodes used
-[OK  ] network          eth0 203.0.113.5/24
-[OK  ] gateway          203.0.113.1 reachable
-[OK  ] dns              example.com -> 93.184.215.14
-[OK  ] services         2/2 active
-[SKIP] user_services    none configured
-[OK  ] ports            2/2 listening
-[OK  ] peers            2/2 reachable
-[OK  ] failed_units     no failed units
-[OK  ] time_sync        clock synchronized
-[WARN] reboot_required  reboot required (linux-image-6.8.0-46-generic)
-[INFO] sessions         1 login session(s)
-[OK  ] zombies          0 zombie process(es)
-
-Overall: CRIT (exit 2)
+# The same policy across three machines, as one JSON document
+firepot --host admin@node-a --host admin@node-b --host admin@node-c --services ssh --json
 ```
 
 ## Features
@@ -180,6 +172,14 @@ The script is sent to each host on standard input (`ssh host bash -s -- <flags>`
 - The `FIREPOT_PROC`, `FIREPOT_ROOT`, and `FIREPOT_INSTALL_DIR` variables replace the `NODE_HEALTHCHECK_*` names, which are still read as fallbacks.
 - The JSON version key stays `"node-healthcheck"`.
 
+## Uninstall
+
+```bash
+rm -f ~/.local/bin/firepot ~/.local/bin/node-healthcheck
+```
+
+Use your `FIREPOT_INSTALL_DIR` instead of `~/.local/bin` if you set one for `setup.sh`. firepot keeps no state and installs nothing on remote hosts.
+
 ## Testing
 
 ```bash
@@ -201,4 +201,8 @@ AGPL-3.0. See [LICENSE](LICENSE) for details.
 
 ---
 
-Built by [Greyforge](https://greyforge.tech) · [Read the Chronicle](https://greyforge.tech/chronicles/firepot-single-script-host-health)
+<p align="center">
+  <b>Useful?</b> <a href="https://github.com/GreyforgeLabs/firepot">Star firepot on GitHub</a> · <a href="https://x.com/GreyforgeLabs">Follow @GreyforgeLabs</a> · <a href="https://greyforge.tech/open-source">More OpenForge tools at greyforge.tech</a>
+</p>
+
+<p align="center"><sub>Background: the <a href="https://greyforge.tech/chronicles/firepot-single-script-host-health">firepot Chronicle</a> · <a href="https://greyforge.tech/llms.txt">Greyforge llms.txt</a></sub></p>
