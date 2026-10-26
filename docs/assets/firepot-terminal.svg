@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="790" height="634" viewBox="0 0 790 634" role="img" aria-label="firepot">
+<title>firepot</title>
+<rect width="790" height="634" rx="10" fill="#0a0d11"/>
+<path d="M0 10a10 10 0 0 1 10-10h770a10 10 0 0 1 10 10v18H0z" fill="#151a21"/>
+<circle cx="18" cy="14" r="5.5" fill="#ff5f57"/>
+<circle cx="36" cy="14" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="14" r="5.5" fill="#28c840"/>
+<text x="395.0" y="18.5" text-anchor="middle" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#7d8794">firepot</text>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','DejaVu Sans Mono',monospace" font-size="13" fill="#e9edf1" xml:space="preserve">
+<text x="18" y="44" textLength="735.1" lengthAdjust="spacingAndGlyphs"><tspan fill="#7d8794">$ </tspan><tspan fill="#ffffff">firepot --services sshd,nginx --ports 22,443 --peers 192.0.2.20,192.0.2.21 --dns example.com</tspan></text>
+<text x="18" y="63" textLength="351.9" lengthAdjust="spacingAndGlyphs">firepot 1.4.0 - node-a - 2026-10-26T22:00:20Z</text>
+<text x="18" y="101" textLength="531.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> system           node-a, kernel 6.12.9-arch1-1, up 12d 4h 49m</text>
+<text x="18" y="120" textLength="477.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> load             0.42 0.31 0.28 on 8 cores (0.05/core)</text>
+<text x="18" y="139" textLength="453.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> memory           41.7% used (6656 MiB of 15960 MiB)</text>
+<text x="18" y="158" textLength="437.9" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> swap             10.1% used (412 MiB of 4096 MiB)</text>
+<text x="18" y="177" textLength="297.2" lengthAdjust="spacingAndGlyphs"><tspan fill="#fda52b">[WARN]</tspan> disk             /srv/media 86%</text>
+<text x="18" y="196" textLength="477.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> inodes           2 filesystem(s) under 80% inodes used</text>
+<text x="18" y="215" textLength="328.4" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> network          eth0 192.0.2.10/24</text>
+<text x="18" y="234" textLength="336.3" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> gateway          192.0.2.1 reachable</text>
+<text x="18" y="253" textLength="383.2" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> dns              example.com -&gt; 192.0.2.53</text>
+<text x="18" y="272" textLength="265.9" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> services         2/2 active</text>
+<text x="18" y="291" textLength="305.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#7d8794">[SKIP]</tspan> user_services    none configured</text>
+<text x="18" y="310" textLength="289.3" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> ports            2/2 listening</text>
+<text x="18" y="329" textLength="289.3" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> peers            2/2 reachable</text>
+<text x="18" y="348" textLength="305.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> failed_units     no failed units</text>
+<text x="18" y="367" textLength="328.4" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> time_sync        clock synchronized</text>
+<text x="18" y="386" textLength="320.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> reboot_required  no reboot pending</text>
+<text x="18" y="405" textLength="328.4" lengthAdjust="spacingAndGlyphs"><tspan fill="#38c8e8">[INFO]</tspan> sessions         1 login session(s)</text>
+<text x="18" y="424" textLength="344.1" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> zombies          0 zombie process(es)</text>
+<text x="18" y="462" textLength="172.0" lengthAdjust="spacingAndGlyphs">Overall: <tspan fill="#fda52b">WARN</tspan> (exit 1)</text>
+<text x="18" y="500" textLength="750.7" lengthAdjust="spacingAndGlyphs"><tspan fill="#7d8794">$ </tspan><tspan fill="#ffffff">firepot --host admin@node-a --host admin@node-b --host admin@node-c --services sshd --ports 22</tspan></text>
+<text x="18" y="519" textLength="148.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#fda52b">[WARN]</tspan> admin@node-a</text>
+<text x="18" y="538" textLength="242.4" lengthAdjust="spacingAndGlyphs">    [warn] disk: /srv/media 86%</text>
+<text x="18" y="557" textLength="148.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> admin@node-b</text>
+<text x="18" y="576" textLength="148.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#7ed38c">[OK  ]</tspan> admin@node-c</text>
+<text x="18" y="614" textLength="172.0" lengthAdjust="spacingAndGlyphs">Overall: <tspan fill="#fda52b">WARN</tspan> (exit 1)</text>
+</g>
+</svg>

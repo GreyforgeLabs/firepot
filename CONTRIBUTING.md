@@ -41,6 +41,11 @@ chore: update dependencies
 - Update documentation for user-facing changes
 - No secrets, credentials, or internal paths in your code
 
+## Releasing
+
+1. Bump `NHC_VERSION` in `bin/firepot`, copy the script to `bin/node-healthcheck`, and add the `CHANGELOG.md` entry.
+2. Push a `vX.Y.Z` tag. The release workflow publishes `firepot`, `node-healthcheck` and a `.sha256` for each under the same names every release, so the README's `releases/latest/download/` links need no edit.
+
 ## Reporting Issues
 
 Use the GitHub issue templates. For bugs, include steps to reproduce. For features, describe the problem you're solving.
